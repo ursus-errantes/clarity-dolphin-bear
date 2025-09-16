@@ -1,6 +1,6 @@
 defaults:
   - _self_
   - common
-  - baseline: stoi  # stoi or whisper
+  - baseline: whisper  # stoi or whisper
 
 split: valid

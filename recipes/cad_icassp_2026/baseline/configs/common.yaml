@@ -1,5 +1,5 @@
 data:
-  cadenza_data_root: ???
+  cadenza_data_root: /home/austin/clarity-dolphin-bear/recipes/cad_icassp_2026/baseline
   dataset: cadenza_data
   sample_rate: 44100  # Sample rate of the audio files
 
