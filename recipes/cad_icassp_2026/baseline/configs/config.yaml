@@ -1,6 +1,6 @@
 defaults:
   - _self_
   - common
-  - baseline: whisper  # stoi or whisper
+  - baseline: features  # stoi or whisper or features
 
-split: valid
+split: train

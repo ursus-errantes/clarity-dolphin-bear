@@ -40,6 +40,7 @@ def compute_asr_for_signal(
         float: correctness score
     """
     reference = record["prompt"]
+    logger.info(f"Computing ASR for signal: {record['signal']}")
 
     score_left = compute_correctness(
         signal[:, 0],
@@ -89,8 +90,18 @@ def compute_correctness(
 
     # Run Whisper ASR
     hypothesis = asr_model.transcribe(
-        str(path_temp), fp16=False, language="en", temperature=0.0
+        str(path_temp),
+        fp16=False,
+        language="en",
+        temperature=0.0,
+        suppress_tokens=[-1],
+        condition_on_previous_text=False,
+        no_speech_threshold=0.0,
+        logprob_threshold=-999.0,
+        compression_ratio_threshold=100.0,
     )["text"]
+    logger.info(f"Reference transcription: {reference}")
+    logger.info(f"ASR transcription: {hypothesis}")
 
     # Score the transcription
     results = scorer.score([reference], [hypothesis])

@@ -1,6 +1,5 @@
-name: stoi
-system: stoi
-stoi_sample_rate: 10000   # Sample rate for STOI computation
+name: features
+system: features
 batch: 1
 n_batches: 1
 

@@ -10,7 +10,6 @@ import hydra
 import numpy as np
 import torch
 from omegaconf import DictConfig
-from pystoi import stoi as compute_stoi
 from torchaudio.pipelines import HDEMUCS_HIGH_MUSDB_PLUS
 from tqdm import tqdm
 
@@ -18,17 +17,16 @@ from clarity.utils.file_io import read_jsonl, write_jsonl
 from clarity.utils.flac_encoder import read_flac_signal
 from clarity.utils.signal_processing import resample
 from recipes.cad_icassp_2026.baseline.shared_predict_utils import (
-    input_align,
     load_vocals,
 )
 
 logger = logging.getLogger(__name__)
 
 
-def compute_stoi_for_signal(
+def compute_VAR_db_for_signal(
     cfg: DictConfig, record: dict, data_root: str, estimated_vocals: np.ndarray
 ) -> float:
-    """Compute the stoi score for a given signal.
+    """Compute the VAR (dB) for a given signal.
 
     Args:
         cfg (DictConfig): configuration object
@@ -54,56 +52,22 @@ def compute_stoi_for_signal(
     signal /= signal_norm_factor
     estimated_vocals /= signal_norm_factor
 
-    # Compute STOI score
-    stoi_score_left = compute_single_stoi(
-        estimated_vocals[:, 0],
-        signal[:, 0],
-        cfg.data.sample_rate,
-        cfg.baseline.stoi_sample_rate,
-    )
-    stoi_score_right = compute_single_stoi(
-        estimated_vocals[:, 1],
-        signal[:, 1],
-        cfg.data.sample_rate,
-        cfg.baseline.stoi_sample_rate,
-    )
-
-    return np.max([stoi_score_left, stoi_score_right])
-
-
-def compute_single_stoi(
-    reference: np.ndarray, processed: np.ndarray, fsamp: int, stoi_fsamp: int = 10000
-) -> float:
-    """Compute the STOI score between a reference and processed signal.
-
-    Args:
-        reference (np.ndarray): Reference signal.
-        processed (np.ndarray): Processed signal.
-        fsamp (int): Sampling frequency.
-        stoi_fsamp (int): Sampling frequency for STOI computation. Default is 10000 Hz.
-
-    Returns:
-        float: STOI score.
-    """
-    reference_side = resample(reference, fsamp, stoi_fsamp)
-    processed_side = resample(processed, fsamp, stoi_fsamp)
-
-    reference_side, processed_side = input_align(
-        reference_side, processed_side, fsamp=int(stoi_fsamp)
-    )
-    stoi_score = compute_stoi(reference_side, processed_side, int(stoi_fsamp))
-    return stoi_score
+    # Compute vocal-to-accompaniment ratio in dB
+    energy_vocals = torch.sum(torch.tensor(estimated_vocals, dtype=torch.float32) ** 2)
+    energy_accomp = torch.sum(torch.tensor(signal, dtype=torch.float32) ** 2) + 1e-10  # avoid divide-by-zero
+    var_db = 10 * torch.log10(energy_vocals / energy_accomp)
+    return var_db.item()
 
 
 # pylint: disable = no-value-for-parameter
 @hydra.main(config_path="configs", config_name="config", version_base=None)
-def run_compute_stoi(cfg: DictConfig) -> None:
-    """Run the STOI score computation."""
-    assert cfg.baseline.name == "stoi"
+def run_compute_features(cfg: DictConfig) -> None:
+    """Compute various audio features."""
+    assert cfg.baseline.name == "features"
 
     logger.info(f"Running {cfg.baseline.system} baseline on {cfg.split} set...")
 
-    # Load the set of signal for which we need to compute scores
+    # Load the set of signal for which we need to compute features
     dataroot = Path(cfg.data.cadenza_data_root) / cfg.data.dataset
 
     dataset_filename = dataroot / "metadata" / f"{cfg.split}_metadata.json"
@@ -139,7 +103,7 @@ def run_compute_stoi(cfg: DictConfig) -> None:
     separation_model.to(device)
 
     # Iterate over the signals that need scoring
-    logger.info(f"Computing scores for {len(records)} out of {total_records} signals")
+    logger.info(f"Computing features for {len(records)} out of {total_records} signals")
     if cfg.baseline.separator.keep_vocals:
         logger.info("Saving estimated vocals. If exist, they will not be recomputed.")
 
@@ -149,12 +113,12 @@ def run_compute_stoi(cfg: DictConfig) -> None:
         estimated_vocals = load_vocals(
             dataroot, record, cfg, separation_model, device=device
         )
-        stoi = compute_stoi_for_signal(cfg, record, dataroot, estimated_vocals)
+        var_db = compute_VAR_db_for_signal(cfg, record, dataroot, estimated_vocals)
 
         # Results are appended to the results file to allow interruption
-        result = {"signal": signal_name, f"{cfg.baseline.system}": stoi}
+        result = {"signal": signal_name, f"{cfg.baseline.system} VAR (dB)": var_db}
         write_jsonl(str(results_file), [result])
 
 
 if __name__ == "__main__":
-    run_compute_stoi()
+    run_compute_features()
