@@ -77,6 +77,7 @@ def load_features(cfg, split: str, system: str, feature: str | None) -> pd.DataF
 
     return pd.DataFrame(records)
 
+
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def run_train_model(cfg: DictConfig) -> None:
     """Train a model to predict the intelligibility score from scalar features."""

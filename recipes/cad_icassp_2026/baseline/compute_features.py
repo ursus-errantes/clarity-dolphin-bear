@@ -53,6 +53,7 @@ def compute_VAR_db_for_signal(
     estimated_vocals /= signal_norm_factor
 
     # Compute vocal-to-accompaniment ratio in dB
+    # TODO: use accomp (residual) instead of signal
     energy_vocals = torch.sum(torch.tensor(estimated_vocals, dtype=torch.float32) ** 2)
     energy_accomp = torch.sum(torch.tensor(signal, dtype=torch.float32) ** 2) + 1e-10  # avoid divide-by-zero
     var_db = 10 * torch.log10(energy_vocals / energy_accomp)
