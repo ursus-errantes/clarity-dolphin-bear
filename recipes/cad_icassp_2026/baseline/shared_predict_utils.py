@@ -175,12 +175,11 @@ def load_mixture(
 
     if cfg.baseline.reference == "processed":
         mix_signal_path = (
-            dataroot / "audio" / cfg.split / "signals" / f"{signal_name}.flac"
+            dataroot / cfg.split / "signals" / f"{signal_name}.flac"
         )
     elif cfg.baseline.reference == "unprocessed":
         mix_signal_path = (
             dataroot
-            / "audio"
             / cfg.split
             / "unprocessed"
             / f"{signal_name}_unproc.flac"

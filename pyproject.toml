@@ -50,6 +50,9 @@ dependencies = [
     "torchaudio",
     "tqdm>=4.62.3",
     "typing_extensions",
+    "openai-whisper",
+    "inflect",
+    "jiwer"
 ]
 
 [project.optional-dependencies]

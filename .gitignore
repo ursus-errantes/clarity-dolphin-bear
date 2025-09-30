@@ -69,3 +69,5 @@ clarity/_version.py
 
 # Sound files
 *.wav
+
+cadenza_data/

@@ -43,7 +43,7 @@ def compute_stoi_for_signal(
 
     # Load processed signal
     signal_path = (
-        Path(data_root) / "audio" / cfg.split / "signals" / f"{signal_name}.flac"
+        Path(data_root) / cfg.split / "signals" / f"{signal_name}.flac"
     )
     signal, proc_sr = read_flac_signal(signal_path)
     if proc_sr != cfg.data.sample_rate:
