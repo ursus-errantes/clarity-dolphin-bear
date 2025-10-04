@@ -44,6 +44,7 @@ def compute_VAR_db_for_signal(
     estimated_vocals = estimated_vocals / (np.max(np.abs(estimated_vocals)) + 1e-10)
     estimated_accomp = estimated_accomp / (np.max(np.abs(estimated_accomp)) + 1e-10)
 
+    # TODO: May want to compute energy in vocal range only
     # Compute vocal-to-accompaniment ratio in dB
     energy_vocals = torch.sum(torch.tensor(estimated_vocals, dtype=torch.float32) ** 2)
     energy_accomp = torch.sum(torch.tensor(estimated_accomp, dtype=torch.float32) ** 2)

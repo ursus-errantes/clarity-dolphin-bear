@@ -14,12 +14,12 @@ from clarity.utils.file_io import read_jsonl
 logger = logging.getLogger(__name__)
 
 class mlp_scalar_features(nn.Module):
-    def __init__(self, num_scalar_features, hidden_sizes=[64, 32], k=3.0):
+    def __init__(self, num_scalar_features, hidden_sizes=[64, 64, 32], k=3.0):
         """
         Args:
             num_scalar_features: number of scalar input features
             hidden_sizes: list of hidden layer sizes
-            k: steepness factor for logistic curve (k > 1 outputs closer to 0 or 1)
+            k: steepness factor for sigmoid (k > 1 outputs closer to 0 or 1)
         """
         super().__init__()
         
