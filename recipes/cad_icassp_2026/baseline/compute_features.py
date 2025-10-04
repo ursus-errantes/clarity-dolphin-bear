@@ -17,14 +17,14 @@ from clarity.utils.file_io import read_jsonl, write_jsonl
 from clarity.utils.flac_encoder import read_flac_signal
 from clarity.utils.signal_processing import resample
 from recipes.cad_icassp_2026.baseline.shared_predict_utils import (
-    load_vocals,
+    load_vocals_and_accomp,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def compute_VAR_db_for_signal(
-    cfg: DictConfig, record: dict, data_root: str, estimated_vocals: np.ndarray
+    cfg: DictConfig, record: dict, data_root: str, estimated_vocals: np.ndarray, estimated_accomp: np.ndarray
 ) -> float:
     """Compute the VAR (dB) for a given signal.
 
@@ -33,29 +33,20 @@ def compute_VAR_db_for_signal(
         record (dict): the metadata dict for the signal
         data_root (str): root path to the dataset
         estimated_vocals (np.ndarray): estimated vocals signal
+        estimated_accomp (np.ndarray): estimated accompaniment signal
 
     Returns:
-        float: stoi score
+        float: vocal-to-accompaniment ratio in dB
     """
     signal_name = record["signal"]
 
-    # Load processed signal
-    signal_path = (
-        Path(data_root) / cfg.split / "signals" / f"{signal_name}.flac"
-    )
-    signal, proc_sr = read_flac_signal(signal_path)
-    if proc_sr != cfg.data.sample_rate:
-        logger.info(f"Resampling {signal_path} to {cfg.data.sample_rate} Hz")
-        signal = resample(signal, proc_sr, cfg.data.sample_rate)
-
-    signal_norm_factor = np.max(np.abs(signal))
-    signal /= signal_norm_factor
-    estimated_vocals /= signal_norm_factor
+    # normalize
+    estimated_vocals = estimated_vocals / (np.max(np.abs(estimated_vocals)) + 1e-10)
+    estimated_accomp = estimated_accomp / (np.max(np.abs(estimated_accomp)) + 1e-10)
 
     # Compute vocal-to-accompaniment ratio in dB
-    # TODO: use accomp (residual) instead of signal
     energy_vocals = torch.sum(torch.tensor(estimated_vocals, dtype=torch.float32) ** 2)
-    energy_accomp = torch.sum(torch.tensor(signal, dtype=torch.float32) ** 2) + 1e-10  # avoid divide-by-zero
+    energy_accomp = torch.sum(torch.tensor(estimated_accomp, dtype=torch.float32) ** 2)
     var_db = 10 * torch.log10(energy_vocals / energy_accomp)
     return var_db.item()
 
@@ -110,11 +101,11 @@ def run_compute_features(cfg: DictConfig) -> None:
 
     for record in tqdm(records):
         signal_name = record["signal"]
-        # Load unprocessed signal to estimate vocals
-        estimated_vocals = load_vocals(
+        # Load or estimate both vocals and accompaniment from processed signal
+        estimated_vocals, estimated_accomp = load_vocals_and_accomp(
             dataroot, record, cfg, separation_model, device=device
         )
-        var_db = compute_VAR_db_for_signal(cfg, record, dataroot, estimated_vocals)
+        var_db = compute_VAR_db_for_signal(cfg, record, dataroot, estimated_vocals, estimated_accomp)
 
         # Results are appended to the results file to allow interruption
         result = {"signal": signal_name, f"{cfg.baseline.system} VAR (dB)": var_db}
