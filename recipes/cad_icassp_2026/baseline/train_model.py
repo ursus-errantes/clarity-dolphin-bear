@@ -5,6 +5,7 @@ import hydra
 from omegaconf import DictConfig
 import pandas as pd
 import torch
+import matplotlib.pyplot as plt
 
 import torch.nn as nn
 import torch.nn.functional as F
@@ -85,7 +86,7 @@ def run_train_model(cfg: DictConfig) -> None:
     logger.info(f"Training model on {cfg.split} set...")
 
     # Define model
-    batch_size = 1
+    batch_size = 32
     num_scalar_features = 3
     model = mlp_scalar_features(num_scalar_features)
 
@@ -108,32 +109,94 @@ def run_train_model(cfg: DictConfig) -> None:
     dataset = torch.utils.data.TensorDataset(input_tensor, labels_tensor)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # define training loop
+    # define parameters for training
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    num_epochs = 10
-    criterion = nn.MSELoss() 
+    num_epochs = 150
+    criterion = nn.MSELoss()
+    patience = 10
+    best_val_loss = float('inf')
+    epochs_no_improve = 0
+    best_model_state = None
+    train_losses = []
+    val_losses = []
+
+    # Split train/val (simple split)
+    val_split = 0.1
+    num_samples = len(dataset)
+    num_val = int(num_samples * val_split)
+    num_train = num_samples - num_val
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [num_train, num_val])
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+    logger.info(f"Training model with parameters:\n batch size {batch_size}, optimizer Adam, loss MSE, num_epochs {num_epochs}, early stopping patience {patience}")
 
     for epoch in range(num_epochs):
-        for features, labels in dataloader:
-            outputs = model(features)
-            loss = criterion(outputs, labels)
-
+        # Training phase
+        model.train()
+        train_loss = 0.0
+        for batch_x, batch_y in train_loader:
             optimizer.zero_grad()
+            outputs = model(batch_x)
+            loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
-        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss.item():.4f}")
+            train_loss += loss.item() * batch_x.size(0)
+        train_loss /= num_train
+        train_losses.append(train_loss)
+
+        # Validation phase
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for val_x, val_y in val_loader:
+                val_outputs = model(val_x)
+                val_loss += criterion(val_outputs, val_y).item() * val_x.size(0)
+        val_loss /= num_val
+        val_losses.append(val_loss)
+
+        print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+
+        # Early stopping check
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            epochs_no_improve = 0
+            best_model_state = model.state_dict()
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                print(f"Early stopping at epoch {epoch+1}")
+                if best_model_state is not None:
+                    model.load_state_dict(best_model_state)
+                break
+
+    # Plot losses
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Validation Loss')
+    plt.legend()
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss')
+    plt.savefig(f"{cfg.data.dataset}.train.mlp_scalar_features.loss_curve.png")
+    plt.close()
     
     # Save model
-    model_path = f"{cfg.data.dataset}.{cfg.split}.mlp_scalar_features.pth"
+    model_path = f"{cfg.data.dataset}.train.mlp_scalar_features.pth"
     torch.save(model.state_dict(), model_path)
     logger.info(f"Model saved to {model_path}")
+
+    # Log a model summary and final loss
+    logger.info(model)
+    logger.info(f"Final training loss: {train_losses[-1]:.4f}, final validation loss: {val_losses[-1]:.4f}")
 
 
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def run_inference(cfg: DictConfig) -> None:
     """Run inference using the trained model on the validation set."""
-    model_path = f"{cfg.data.dataset}.{cfg.split}.mlp_scalar_features.pth"
+    model_path = f"{cfg.data.dataset}.train.mlp_scalar_features.pth"
+    logger.info(f"Running inference using model from {model_path}...")
+
     num_scalar_features = 3
     model = mlp_scalar_features(num_scalar_features)
     model.load_state_dict(torch.load(model_path))
@@ -155,6 +218,11 @@ def run_inference(cfg: DictConfig) -> None:
     with torch.no_grad():
         outputs = model(validation_tensor)
         print(outputs)
+        # save outputs to csv
+        merged_df['predicted_correctness'] = outputs.numpy()
+        output_csv_path = f"{cfg.data.dataset}.valid.mlp_scalar_features.inference.csv"
+        merged_df.to_csv(output_csv_path, index=False)
+        logger.info(f"Inference results saved to {output_csv_path}")
 
 
 if __name__ == "__main__":
