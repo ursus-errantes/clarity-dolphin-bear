@@ -1,6 +1,7 @@
 data:
-  # cadenza_data_root: /home/austin/clarity-dolphin-bear/recipes/cad_icassp_2026/baseline
-  cadenza_data_root: /home/austin/clarity-dolphin-bear
+  cadenza_data_root: /Users/bear/Documents/bionic-ear-lab/clarity-dolphin-bear/recipes/cad_icassp_2026
+  #cadenza_data_root: /home/austin/clarity-dolphin-bear/recipes/cad_icassp_2026/baseline
+  # cadenza_data_root: /home/austin/clarity-dolphin-bear
   dataset: cadenza_data
   sample_rate: 44100  # Sample rate of the audio files
 
