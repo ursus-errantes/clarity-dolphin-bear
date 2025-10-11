@@ -156,7 +156,7 @@ def run_train_model(cfg: DictConfig) -> None:
         val_loss /= num_val
         val_losses.append(val_loss)
 
-        print(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+        logger.info(f"Epoch {epoch+1}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
 
         # Early stopping check
         if val_loss < best_val_loss:
@@ -192,8 +192,11 @@ def run_train_model(cfg: DictConfig) -> None:
 
 
 @hydra.main(config_path="configs", config_name="config", version_base=None)
-def run_inference(cfg: DictConfig, split: str = "valid") -> None:
-    """Run inference using the trained model on the validation set."""
+def run_inference(cfg: DictConfig) -> None:
+    """Run inference using the trained model on both the train and validation sets.
+    Inference on train set can be compared to correctness labels to get a sense of model fit.
+    Inference on validation set must be submitted to leaderboard to evaluate performance.
+    """
     model_path = f"{cfg.data.dataset}.train.mlp_scalar_features.pth"
     logger.info(f"Running inference using model from {model_path}...")
 
@@ -203,29 +206,50 @@ def run_inference(cfg: DictConfig, split: str = "valid") -> None:
     model.eval()
 
     # gather STOI score, whisper score, and VAR dB as input features from jsonl files
-    stoi_df = load_features(cfg, split, "stoi", None)
-    whisper_df = load_features(cfg, split, "whisper", None)
-    features_df = load_features(cfg, split, "features", "VAR (dB)")
+    stoi_df = load_features(cfg, "train", "stoi", None)
+    whisper_df = load_features(cfg, "train", "whisper", None)
+    features_df = load_features(cfg, "train", "features", "VAR (dB)")
     # merge dataframes on 'signal' column
-    merged_df = stoi_df.merge(whisper_df[['signal', 'whisper']], on='signal')
-    merged_df = merged_df.merge(features_df[['signal', 'features']], on='signal')
-    print(merged_df.head())
+    merged_df_train = stoi_df.merge(whisper_df[['signal', 'whisper']], on='signal')
+    merged_df_train = merged_df_train.merge(features_df[['signal', 'features']], on='signal')
+    print(merged_df_train.head())
     # create input tensor
-    input_features = merged_df[['stoi', 'whisper', 'features']].values
-    validation_tensor = torch.tensor(input_features, dtype=torch.float32)
+    input_features = merged_df_train[['stoi', 'whisper', 'features']].values
+    input_tensor = torch.tensor(input_features, dtype=torch.float32)
 
     # Run inference
     with torch.no_grad():
-        outputs = model(validation_tensor)
+        outputs = model(input_tensor)
         print(outputs)
         # save outputs to csv
-        merged_df['predicted_correctness'] = outputs.numpy()
-        output_csv_path = f"{cfg.data.dataset}.{split}.mlp_scalar_features.inference.csv"
-        merged_df.to_csv(output_csv_path, index=False)
+        merged_df_train['predicted_correctness'] = outputs.numpy()
+        output_csv_path = f"{cfg.data.dataset}.train.mlp_scalar_features.inference.csv"
+        merged_df_train.to_csv(output_csv_path, index=False)
+        logger.info(f"Inference results saved to {output_csv_path}")
+    
+    # repeat for validation set
+    stoi_df = load_features(cfg, "valid", "stoi", None)
+    whisper_df = load_features(cfg, "valid", "whisper", None)
+    features_df = load_features(cfg, "valid", "features", "VAR (dB)")
+    # merge dataframes on 'signal' column
+    merged_df_valid = stoi_df.merge(whisper_df[['signal', 'whisper']], on='signal')
+    merged_df_valid = merged_df_valid.merge(features_df[['signal', 'features']], on='signal')
+    print(merged_df_valid.head())
+    # create input tensor
+    input_features = merged_df_valid[['stoi', 'whisper', 'features']].values
+    input_tensor = torch.tensor(input_features, dtype=torch.float32)
+
+    # Run inference
+    with torch.no_grad():
+        outputs = model(input_tensor)
+        print(outputs)
+        # save outputs to csv
+        merged_df_valid['predicted_correctness'] = outputs.numpy()
+        output_csv_path = f"{cfg.data.dataset}.valid.mlp_scalar_features.inference.csv"
+        merged_df_valid.to_csv(output_csv_path, index=False)
         logger.info(f"Inference results saved to {output_csv_path}")
 
 
 if __name__ == "__main__":
     run_train_model()
-    run_inference("train") # run inference on train to be able to compare with correctness
-    run_inference("valid") # results of inference on valid have to be submitted to leaderboard for evaluation
+    run_inference()
