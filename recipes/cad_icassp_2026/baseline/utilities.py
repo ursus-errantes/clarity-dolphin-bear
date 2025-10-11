@@ -2,6 +2,9 @@ import numpy as np
 import scipy
 import matplotlib.pyplot as plt
 import torch
+import os
+import sys
+import subprocess
 
 from train_model import mlp_scalar_features
 
@@ -44,10 +47,10 @@ def normalize_audio(
     return audio
 
 
-def investigate_model_weights():
+def investigate_model_weights(model_path: str = "./exp/cadenza_data.train.mlp_scalar_features.pth") -> None:
     """Investigate the weights of the trained MLP model."""
     # Load model weights
-    model_path = "./exp/cadenza_data.train.mlp_scalar_features.pth"
+    model_path = model_path
     model_weights = torch.load(model_path, map_location=torch.device('cpu'))
     
     # Extract weights and biases from the first layer
@@ -84,3 +87,27 @@ def investigate_model_weights():
     plt.bar(["Feature 1", "Feature 2", "Feature 3"], np.abs(grad_importance))
     plt.title("Feature relevance via grad × input")
     plt.show()
+
+
+def find_flac_file(filename: str, directory: str) -> str:
+    for root, dirs, files in os.walk(directory):
+        if filename in files:
+            return os.path.join(root, filename)
+    return ""
+
+
+def play_flac_file(filepath: str):
+    try:
+        subprocess.run(["ffplay", "-nodisp", "-autoexit", filepath])
+    except Exception as e:
+        print(f"Error playing file: {e}")
+
+
+def find_and_play(filename: str, directory: str):
+    filepath = find_flac_file(filename, directory)
+
+    if filepath:
+        print(f"Playing file: {filepath}")
+        play_flac_file(filepath)
+    else:
+        print(f"File '{filename}' not found.")
