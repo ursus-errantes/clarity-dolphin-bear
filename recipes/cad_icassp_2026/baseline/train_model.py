@@ -112,7 +112,7 @@ def run_train_model(cfg: DictConfig) -> None:
     # define parameters for training
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    num_epochs = 150
+    num_epochs = 100
     criterion = nn.MSELoss()
     patience = 10
     best_val_loss = float('inf')
@@ -192,7 +192,7 @@ def run_train_model(cfg: DictConfig) -> None:
 
 
 @hydra.main(config_path="configs", config_name="config", version_base=None)
-def run_inference(cfg: DictConfig) -> None:
+def run_inference(cfg: DictConfig, split: str = "valid") -> None:
     """Run inference using the trained model on the validation set."""
     model_path = f"{cfg.data.dataset}.train.mlp_scalar_features.pth"
     logger.info(f"Running inference using model from {model_path}...")
@@ -203,9 +203,9 @@ def run_inference(cfg: DictConfig) -> None:
     model.eval()
 
     # gather STOI score, whisper score, and VAR dB as input features from jsonl files
-    stoi_df = load_features(cfg, "valid", "stoi", None)
-    whisper_df = load_features(cfg, "valid", "whisper", None)
-    features_df = load_features(cfg, "valid", "features", "VAR (dB)")
+    stoi_df = load_features(cfg, split, "stoi", None)
+    whisper_df = load_features(cfg, split, "whisper", None)
+    features_df = load_features(cfg, split, "features", "VAR (dB)")
     # merge dataframes on 'signal' column
     merged_df = stoi_df.merge(whisper_df[['signal', 'whisper']], on='signal')
     merged_df = merged_df.merge(features_df[['signal', 'features']], on='signal')
@@ -220,11 +220,12 @@ def run_inference(cfg: DictConfig) -> None:
         print(outputs)
         # save outputs to csv
         merged_df['predicted_correctness'] = outputs.numpy()
-        output_csv_path = f"{cfg.data.dataset}.valid.mlp_scalar_features.inference.csv"
+        output_csv_path = f"{cfg.data.dataset}.{split}.mlp_scalar_features.inference.csv"
         merged_df.to_csv(output_csv_path, index=False)
         logger.info(f"Inference results saved to {output_csv_path}")
 
 
 if __name__ == "__main__":
     run_train_model()
-    run_inference()
+    run_inference("train") # run inference on train to be able to compare with correctness
+    run_inference("valid") # results of inference on valid have to be submitted to leaderboard for evaluation
