@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 import scipy
 import matplotlib.pyplot as plt
 import torch
@@ -87,6 +88,17 @@ def investigate_model_weights(model_path: str = "./exp/cadenza_data.train.mlp_sc
     plt.bar(["Feature 1", "Feature 2", "Feature 3"], np.abs(grad_importance))
     plt.title("Feature relevance via grad × input")
     plt.show()
+
+
+def compute_inference_rmse(filepath = "./exp/cadenza_data.train.mlp_scalar_features.inference.csv") -> float:
+    """Compute RMSE of inference results against correctness labels in train set."""
+    df = pd.read_csv(filepath)
+    if 'correctness' not in df.columns or 'predicted_correctness' not in df.columns:
+        raise ValueError("CSV must contain 'correctness' and 'predicted_correctness' columns.")
+    
+    rmse = np.sqrt(np.mean((df['correctness'] - df['predicted_correctness']) ** 2))
+    print(f"RMSE of inference results: {rmse:.4f}")
+    return rmse
 
 
 def find_flac_file(filename: str, directory: str) -> str:
