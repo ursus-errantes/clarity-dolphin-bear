@@ -5,6 +5,7 @@ n_batches: 1
 
 separator:
   keep_vocals: True # Set to True if you want to keep the separated vocals
+  keep_accomp: True # Set to True if you want to keep the separated accompaniment
   sample_rate: 44100 # sample_rate of the separation model
 
-reference: unprocessed
+reference: processed # Use signals with hearing loss processing applied as reference for source separation
