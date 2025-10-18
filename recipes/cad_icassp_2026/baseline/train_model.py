@@ -94,6 +94,12 @@ def run_train_model(cfg: DictConfig) -> None:
     stoi_df = load_features(cfg, "train", "stoi", None)
     whisper_df = load_features(cfg, "train", "whisper", None)
     features_df = load_features(cfg, "train", "features", "VAR (dB)")
+    # use z-score normalization for VAR (dB)
+    mean_var = features_df['features'].mean()
+    std_var = features_df['features'].std()
+    features_df['features'] = (features_df['features'] - mean_var) / std_var
+    print("min VAR (dB): ", features_df['features'].min())
+    print("max VAR (dB): ", features_df['features'].max())
     # merge dataframes on 'signal' column
     merged_df = stoi_df.merge(whisper_df[['signal', 'whisper']], on='signal')
     merged_df = merged_df.merge(features_df[['signal', 'features']], on='signal')
@@ -209,6 +215,12 @@ def run_inference(cfg: DictConfig) -> None:
     stoi_df = load_features(cfg, "train", "stoi", None)
     whisper_df = load_features(cfg, "train", "whisper", None)
     features_df = load_features(cfg, "train", "features", "VAR (dB)")
+    # use z-score normalization for VAR (dB)
+    mean_var = features_df['features'].mean()
+    std_var = features_df['features'].std()
+    features_df['features'] = (features_df['features'] - mean_var) / std_var
+    print("min VAR (dB): ", features_df['features'].min())
+    print("max VAR (dB): ", features_df['features'].max())
     # merge dataframes on 'signal' column
     merged_df_train = stoi_df.merge(whisper_df[['signal', 'whisper']], on='signal')
     merged_df_train = merged_df_train.merge(features_df[['signal', 'features']], on='signal')
