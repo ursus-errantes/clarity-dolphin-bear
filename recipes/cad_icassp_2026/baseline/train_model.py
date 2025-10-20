@@ -15,6 +15,107 @@ from clarity.utils.file_io import read_jsonl
 logger = logging.getLogger(__name__)
 
 
+class temporal_attention_pool(nn.Module):
+    """Learnable attention pooling over time dimension. Works for both 1d and 2d feature inputs."""
+    def __init__(self, input_dim):
+        super().__init__()
+        # Linear attention layer maps each time step feature vector to a scalar score
+        self.attention = nn.Linear(input_dim, 1)
+
+    def forward(self, x, mask=None):
+        """
+        x: tensor of shape (batch_size, input_dim, time_steps)
+        mask: tensor of shape (batch_size, time_steps) indicating valid elements
+        mask is currently not used but will be needed for batching variable-length inputs
+        """
+        # Compute attention scores
+        attn_scores = self.attention(x.permute(0, 2, 1))  # shape: (batch_size, time_steps, input_dim) -> (batch_size, time_steps, 1)
+        attn_weights = F.softmax(attn_scores, dim=1)  # shape: (batch_size, time_steps, 1)
+
+        # Weighted sum of inputs
+        pooled = torch.sum(attn_weights * x.permute(0, 2, 1), dim=1)  # shape: (batch_size, input_dim)
+        return pooled
+    
+
+class multimodal_conv_mlp(nn.Module):
+    """Combines MLP for scalar features with CNN and attention pooling for 1d and 2d features."""
+    def __init__(self, c1_in, c2_in, scalar_dim, k=3.0, p_dropout=0.3):
+        """
+        Args:
+            c1_in: number of input channels for 1D CNN
+            c2_in: number of input channels for 2D CNN
+            scalar_dim: dimensionality of scalar features
+            k: steepness factor for sigmoid (k > 1 outputs closer to 0 or 1)
+            p_dropout: dropout probability for final MLP
+        """
+        super().__init__()
+
+        # 1D CNN encoder for temporal features
+        self.encoder_1d = nn.Sequential(
+            nn.Conv1d(c1_in, 64, kernel_size=5, padding=2),
+            nn.ReLU(),
+            nn.Conv1d(64, 64, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+        self.attn_pool_1d = temporal_attention_pool(64)
+
+        # 2D CNN encoder for spectro-temporal features
+        self.encoder_2d = nn.Sequential(
+            nn.Conv2d(c2_in, 64, kernel_size=(3,3), padding=(1,1)),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=(3,3), padding=(1,1)),
+            nn.ReLU(),
+        )
+        # projection after frequency pooling
+        self.projection_2d = nn.Conv1d(64, 64, kernel_size=1) # learn linear weights for each channel per time step
+        self.attn_pool_2d = temporal_attention_pool(64)
+
+        # simple MLP for scalar features
+        self.mlp_scalar = nn.Sequential(
+            nn.Linear(scalar_dim, 32),
+            nn.ReLU(),
+        )
+
+        # final MLP concatenating the summaries of the three feature types
+        self.final_mlp = nn.Sequential(
+            nn.Linear(64 + 64 + 32, 64),
+            # nn.BatchNorm1d(64), # using batch size 1 for testing, so batchnorm not appropriate
+            nn.ReLU(),
+            nn.Dropout(p_dropout),
+            nn.Linear(64, 1),
+        )
+        # sigmoid steepness factor
+        self.k = k
+
+    def forward(self, x1d, x2d, x_scalar, mask=None):
+        """
+        x1d: tensor of shape (batch_size, c1_in, time_steps)
+        x2d: tensor of shape (batch_size, c2_in, freq_bins, time_steps)
+        x_scalar: tensor of shape (batch_size, scalar_dim)
+        mask: tensor of shape (batch_size, time_steps) indicating valid elements (needed for batching variable-length inputs)
+        """
+        # Process 1D features
+        x1d = self.encoder_1d(x1d)  # shape: (batch_size, 64, time_steps)
+        x1d = self.attn_pool_1d(x1d, mask)  # shape: (batch_size, 64)
+
+        # Process 2D features
+        x2d = self.encoder_2d(x2d)  # shape: (batch_size, 64, freq_bins, time_steps)
+        x2d = torch.mean(x2d, dim=2)  # average over frequency dimension -> (batch_size, 64, time_steps)
+        x2d = self.projection_2d(x2d)  # shape: (batch_size, 64, time_steps)
+        x2d = self.attn_pool_2d(x2d, mask)  # shape: (batch_size, 64)
+
+        # Process scalar features
+        x_scalar = self.mlp_scalar(x_scalar)  # shape: (batch_size, 32)
+
+        # Concatenate all summaries
+        combined = torch.cat([x1d, x2d, x_scalar], dim=-1)  # shape: (batch_size, 64 + 64 + 32)
+
+        # Final MLP
+        output = self.final_mlp(combined)  # shape: (batch_size, 1)
+        output = torch.sigmoid(self.k * output)  # skew toward edges of [0, 1]
+        return output
+
+
 class mlp_scalar_features(nn.Module):
     def __init__(
         self, num_scalar_features, hidden_sizes=[64, 64, 32], k=3.0, p_dropout=0.1
@@ -93,12 +194,25 @@ def run_train_model(cfg: DictConfig) -> None:
     logger.info(f"Training model on {cfg.split} set...")
 
     # Define model
-    batch_size = 32
+    batch_size = 1
     num_scalar_features = 3
-    k = 3.0
-    p_dropout = 0.1
-    model = mlp_scalar_features(num_scalar_features, k=k, p_dropout=p_dropout)
+    num_1d_channels = 1
+    num_2d_channels = 1
+    k = 1.0
+    p_dropout = 0.3
+    # model = mlp_scalar_features(num_scalar_features, k=k, p_dropout=p_dropout)
+    model = multimodal_conv_mlp(
+        num_1d_channels, num_2d_channels, num_scalar_features, k=k, p_dropout=p_dropout
+    )
 
+    # create dummy data for 1d feature over 128 time steps
+    x1d = torch.randn(8802, num_1d_channels, 128)
+    print(f"x1d shape: {x1d.shape}")
+    # create dummy data for 2d feature over 64 freq bins and 128 time steps
+    x2d = torch.randn(8802, num_2d_channels, 64, 128)
+    print(f"x2d shape: {x2d.shape}")
+
+    # prepare scalar inputs
     # gather STOI score, whisper score, and VAR dB as input features from jsonl files
     stoi_df = load_features(cfg, "train", "stoi", None)
     whisper_df = load_features(cfg, "train", "whisper", None)
@@ -115,18 +229,16 @@ def run_train_model(cfg: DictConfig) -> None:
     print(merged_df.head())
 
     # create input tensor
-    input_features = merged_df[["stoi", "whisper", "features"]].values
-    input_tensor = torch.tensor(input_features, dtype=torch.float32)
+    input_scalar_features = merged_df[["stoi", "whisper", "features"]].values
+    scalar_tensor = torch.tensor(input_scalar_features, dtype=torch.float32)
     # create labels tensor
     labels = merged_df["correctness"].values
     labels_tensor = torch.tensor(labels, dtype=torch.float32).unsqueeze(
         1
     )  # shape: (num_samples, 1)
-    # create dataloader
-    dataset = torch.utils.data.TensorDataset(input_tensor, labels_tensor)
-    dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=batch_size, shuffle=True
-    )
+
+    # create dataset combining multimodal features
+    dataset = torch.utils.data.TensorDataset(x1d, x2d, scalar_tensor, labels_tensor)
 
     # define parameters for training
     model.train()
@@ -163,13 +275,13 @@ def run_train_model(cfg: DictConfig) -> None:
         # Training phase
         model.train()
         train_loss = 0.0
-        for batch_x, batch_y in train_loader:
+        for batch_x1d, batch_x2d, batch_scalar, batch_y in train_loader:
             optimizer.zero_grad()
-            outputs = model(batch_x)
+            outputs = model(batch_x1d, batch_x2d, batch_scalar)
             loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
-            train_loss += loss.item() * batch_x.size(0)
+            train_loss += loss.item() * batch_scalar.size(0) # average loss * batch size = total loss
         train_loss /= num_train
         train_losses.append(train_loss)
 
@@ -177,9 +289,9 @@ def run_train_model(cfg: DictConfig) -> None:
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for val_x, val_y in val_loader:
-                val_outputs = model(val_x)
-                val_loss += criterion(val_outputs, val_y).item() * val_x.size(0)
+            for val_x1d, val_x2d, val_scalar, val_y in val_loader:
+                val_outputs = model(val_x1d, val_x2d, val_scalar)
+                val_loss += criterion(val_outputs, val_y).item() * val_scalar.size(0) # average loss * batch size = total loss
         val_loss /= num_val
         val_losses.append(val_loss)
 
