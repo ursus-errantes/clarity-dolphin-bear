@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from pathlib import Path
 import hydra
 from omegaconf import DictConfig
@@ -9,6 +10,7 @@ import matplotlib.pyplot as plt
 
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.rnn import pad_sequence
 
 from clarity.utils.file_io import read_jsonl
 
@@ -50,14 +52,15 @@ class multimodal_conv_mlp(nn.Module):
         """
         super().__init__()
 
-        # 1D CNN encoder for temporal features
-        self.encoder_1d = nn.Sequential(
-            nn.Conv1d(c1_in, 64, kernel_size=5, padding=2),
-            nn.ReLU(),
-            nn.Conv1d(64, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-        )
-        self.attn_pool_1d = temporal_attention_pool(64)
+        # testing with 2d mfccs, not using 1d features for now
+        # # 1D CNN encoder for temporal features
+        # self.encoder_1d = nn.Sequential(
+        #     nn.Conv1d(c1_in, 64, kernel_size=5, padding=2),
+        #     nn.ReLU(),
+        #     nn.Conv1d(64, 64, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        # )
+        # self.attn_pool_1d = temporal_attention_pool(64)
 
         # 2D CNN encoder for spectro-temporal features
         self.encoder_2d = nn.Sequential(
@@ -78,7 +81,7 @@ class multimodal_conv_mlp(nn.Module):
 
         # final MLP concatenating the summaries of the three feature types
         self.final_mlp = nn.Sequential(
-            nn.Linear(64 + 64 + 32, 64),
+            nn.Linear(64 + 32, 64),
             # nn.BatchNorm1d(64), # using batch size 1 for testing, so batchnorm not appropriate
             nn.ReLU(),
             nn.Dropout(p_dropout),
@@ -94,9 +97,10 @@ class multimodal_conv_mlp(nn.Module):
         x_scalar: tensor of shape (batch_size, scalar_dim)
         mask: tensor of shape (batch_size, time_steps) indicating valid elements (needed for batching variable-length inputs)
         """
+        # testing with 2d mfccs, not using 1d features for now
         # Process 1D features
-        x1d = self.encoder_1d(x1d)  # shape: (batch_size, 64, time_steps)
-        x1d = self.attn_pool_1d(x1d, mask)  # shape: (batch_size, 64)
+        # x1d = self.encoder_1d(x1d)  # shape: (batch_size, 64, time_steps)
+        # x1d = self.attn_pool_1d(x1d, mask)  # shape: (batch_size, 64)
 
         # Process 2D features
         x2d = self.encoder_2d(x2d)  # shape: (batch_size, 64, freq_bins, time_steps)
@@ -108,7 +112,8 @@ class multimodal_conv_mlp(nn.Module):
         x_scalar = self.mlp_scalar(x_scalar)  # shape: (batch_size, 32)
 
         # Concatenate all summaries
-        combined = torch.cat([x1d, x2d, x_scalar], dim=-1)  # shape: (batch_size, 64 + 64 + 32)
+        # combined = torch.cat([x1d, x2d, x_scalar], dim=-1)  # shape: (batch_size, 64 + 64 + 32)
+        combined = torch.cat([x2d, x_scalar], dim=-1)  # shape: (batch_size, 64 + 32)
 
         # Final MLP
         output = self.final_mlp(combined)  # shape: (batch_size, 1)
@@ -193,24 +198,32 @@ def run_train_model(cfg: DictConfig) -> None:
 
     logger.info(f"Training model on {cfg.split} set...")
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+
     # Define model
     batch_size = 1
     num_scalar_features = 3
-    num_1d_channels = 1
-    num_2d_channels = 1
+    # num_1d_channels = 1
+    num_1d_channels = 0  # testing with 2d mfccs, not using 1d features for now
+    num_2d_channels = 2  # MFCCs in stereo
     k = 1.0
     p_dropout = 0.3
     # model = mlp_scalar_features(num_scalar_features, k=k, p_dropout=p_dropout)
     model = multimodal_conv_mlp(
         num_1d_channels, num_2d_channels, num_scalar_features, k=k, p_dropout=p_dropout
     )
+    model = model.to(device) # move model to GPU if available
 
-    # create dummy data for 1d feature over 128 time steps
-    x1d = torch.randn(8802, num_1d_channels, 128)
-    print(f"x1d shape: {x1d.shape}")
-    # create dummy data for 2d feature over 64 freq bins and 128 time steps
-    x2d = torch.randn(8802, num_2d_channels, 64, 128)
-    print(f"x2d shape: {x2d.shape}")
+    # load mfcc data
+    mfcc_dir = "/mnt/d/cadenza_extracted_features/mfccs_raw_batch_1/mfcc/"
+    x2d_dfs = []
+    for file in os.listdir(mfcc_dir):
+        if file.endswith(".json"):
+            mfcc_path = os.path.join(mfcc_dir, file)
+            mfcc_df = pd.read_json(mfcc_path)
+            x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
+    x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
 
     # prepare scalar inputs
     # gather STOI score, whisper score, and VAR dB as input features from jsonl files
@@ -226,9 +239,32 @@ def run_train_model(cfg: DictConfig) -> None:
     # merge dataframes on 'signal' column
     merged_df = stoi_df.merge(whisper_df[["signal", "whisper"]], on="signal")
     merged_df = merged_df.merge(features_df[["signal", "features"]], on="signal")
-    print(merged_df.head())
+    # remove signals that don't have mfcc data
+    merged_df = merged_df[merged_df["signal"].isin(x2d_df.columns)]
+    assert len(merged_df) == x2d_df.shape[1], "Mismatch in number of samples between scalar and 2d features"
+    print("scalar features:\n",merged_df.head())
 
-    # create input tensor
+    # prepare tensor of mfccs, padding to largest time dimension
+    mfccs = []
+    for col in x2d_df.columns:
+        # Get the two channels of variable-length arrays
+        arrays = [torch.tensor(arr, dtype=torch.float32) for arr in x2d_df[col]]
+        # Each `arr` is (13, t_i)
+        stacked = torch.stack(arrays, dim=0)  # shape: (2, 13, t_i)
+        mfccs.append(stacked)
+    # Convert each to (t_i, 2, 13) for pad_sequence
+    seqs = [x.permute(2, 0, 1) for x in mfccs]
+    # Pad to (batch, max_t, 2, 13)
+    padded = pad_sequence(seqs, batch_first=True)
+    # Move back to (batch, 2, 13, max_t)
+    padded = padded.permute(0, 2, 3, 1)
+    assert padded.shape[0] == len(merged_df), "Mismatch in number of samples between scalar and 2d features"
+    assert padded.shape[1] == num_2d_channels, "Mismatch in number of 2d channels"
+    assert padded.shape[2] == 13, "Expected 13 MFCC coefficients"
+    x2d = padded
+    print(f"x2d shape: {x2d.shape}")
+
+    # create input tensor of scalar features
     input_scalar_features = merged_df[["stoi", "whisper", "features"]].values
     scalar_tensor = torch.tensor(input_scalar_features, dtype=torch.float32)
     # create labels tensor
@@ -236,6 +272,10 @@ def run_train_model(cfg: DictConfig) -> None:
     labels_tensor = torch.tensor(labels, dtype=torch.float32).unsqueeze(
         1
     )  # shape: (num_samples, 1)
+
+    # create dummy data for 1d feature over max time dimension
+    x1d = torch.randn(len(merged_df), num_1d_channels, x2d.shape[-1])
+    print(f"x1d shape: {x1d.shape}")
 
     # create dataset combining multimodal features
     dataset = torch.utils.data.TensorDataset(x1d, x2d, scalar_tensor, labels_tensor)
@@ -276,6 +316,12 @@ def run_train_model(cfg: DictConfig) -> None:
         model.train()
         train_loss = 0.0
         for batch_x1d, batch_x2d, batch_scalar, batch_y in train_loader:
+            # move data to GPU if available
+            batch_x1d = batch_x1d.to(device)
+            batch_x2d = batch_x2d.to(device)
+            batch_scalar = batch_scalar.to(device)
+            batch_y = batch_y.to(device)
+
             optimizer.zero_grad()
             outputs = model(batch_x1d, batch_x2d, batch_scalar)
             loss = criterion(outputs, batch_y)
@@ -290,6 +336,12 @@ def run_train_model(cfg: DictConfig) -> None:
         val_loss = 0.0
         with torch.no_grad():
             for val_x1d, val_x2d, val_scalar, val_y in val_loader:
+                # move data to GPU if available
+                val_x1d = val_x1d.to(device)
+                val_x2d = val_x2d.to(device)
+                val_scalar = val_scalar.to(device)
+                val_y = val_y.to(device)
+
                 val_outputs = model(val_x1d, val_x2d, val_scalar)
                 val_loss += criterion(val_outputs, val_y).item() * val_scalar.size(0) # average loss * batch size = total loss
         val_loss /= num_val
