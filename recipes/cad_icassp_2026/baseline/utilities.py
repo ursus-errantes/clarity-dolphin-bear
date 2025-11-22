@@ -6,6 +6,7 @@ import torch
 import os
 import sys
 import subprocess
+import librosa
 
 from train_model import mlp_scalar_features
 
@@ -123,3 +124,13 @@ def find_and_play(filename: str, directory: str):
         play_flac_file(filepath)
     else:
         print(f"File '{filename}' not found.")
+
+
+def extract_mfcc(audio, sr=16000, n_mfcc=13):
+    """
+    Extract normalized MFCC features.
+    """
+    mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=n_mfcc)
+    mfccs = (mfccs - np.mean(mfccs, axis=1, keepdims=True)) / \
+            (np.std(mfccs, axis=1, keepdims=True) + 1e-6)
+    return mfccs

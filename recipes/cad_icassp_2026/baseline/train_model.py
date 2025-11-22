@@ -216,14 +216,16 @@ def run_train_model(cfg: DictConfig) -> None:
     model = model.to(device) # move model to GPU if available
 
     # load mfcc data
-    mfcc_dir = "/mnt/d/cadenza_extracted_features/mfccs_raw_batch_1/mfcc/"
+    mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
     x2d_dfs = []
     for file in os.listdir(mfcc_dir):
         if file.endswith(".json"):
+            print(f"Processing file: {file}")
             mfcc_path = os.path.join(mfcc_dir, file)
             mfcc_df = pd.read_json(mfcc_path)
             x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
     x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
+    assert len(x2d_df.columns) == 8802, f"Expected 8802 signals in MFCC data but got {len(x2d_df.columns)}"
 
     # prepare scalar inputs
     # gather STOI score, whisper score, and VAR dB as input features from jsonl files
@@ -371,11 +373,11 @@ def run_train_model(cfg: DictConfig) -> None:
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
     plt.title("Training and Validation Loss")
-    plt.savefig(f"{cfg.data.dataset}.train.mlp_scalar_features.loss_curve.png")
+    plt.savefig(f"{cfg.data.dataset}.train.{model.__class__.__name__}.loss_curve.png")
     plt.close()
 
     # Save model
-    model_path = f"{cfg.data.dataset}.train.mlp_scalar_features.pth"
+    model_path = f"{cfg.data.dataset}.train.{model.__class__.__name__}.pth"
     torch.save(model.state_dict(), model_path)
     logger.info(f"Model saved to {model_path}")
 
@@ -392,18 +394,122 @@ def run_inference(cfg: DictConfig) -> None:
     Inference on train set can be compared to correctness labels to get a sense of model fit.
     Inference on validation set must be submitted to leaderboard to evaluate performance.
     """
-    model_path = f"{cfg.data.dataset}.train.mlp_scalar_features.pth"
-    logger.info(f"Running inference using model from {model_path}...")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.cuda.empty_cache()
+    logger.info(f"Using device: {device}")
 
     num_scalar_features = 3
-    model = mlp_scalar_features(num_scalar_features)
-    model.load_state_dict(torch.load(model_path))
+    # num_1d_channels = 1
+    num_1d_channels = 0  # testing with 2d mfccs, not using 1d features for now
+    num_2d_channels = 2  # MFCCs in stereo
+    k = 1.0
+    p_dropout = 0.3
+    model = multimodal_conv_mlp(num_1d_channels, num_2d_channels, num_scalar_features, k=k, p_dropout=p_dropout)
+
+    model_path = f"{cfg.data.dataset}.train.{model.__class__.__name__}.pth"
+    logger.info(f"Running inference using model from {model_path}...")
+
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    model.to(device) # move model to GPU if available
     model.eval()
 
+    # # load mfcc data
+    # mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
+    # x2d_dfs = []
+    # for file in os.listdir(mfcc_dir):
+    #     if file.endswith(".json"):
+    #         print(f"Processing file: {file}")
+    #         mfcc_path = os.path.join(mfcc_dir, file)
+    #         mfcc_df = pd.read_json(mfcc_path)
+    #         x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
+    # x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
+
+    # # gather STOI score, whisper score, and VAR dB as input features from jsonl files
+    # stoi_df = load_features(cfg, "train", "stoi", None)
+    # whisper_df = load_features(cfg, "train", "whisper", None)
+    # features_df = load_features(cfg, "train", "features", "VAR (dB)")
+    # # use z-score normalization for VAR (dB)
+    # mean_var = features_df["features"].mean()
+    # std_var = features_df["features"].std()
+    # features_df["features"] = (features_df["features"] - mean_var) / std_var
+    # print("min VAR (dB): ", features_df["features"].min())
+    # print("max VAR (dB): ", features_df["features"].max())
+    # # merge dataframes on 'signal' column
+    # merged_df_train = stoi_df.merge(whisper_df[["signal", "whisper"]], on="signal")
+    # merged_df_train = merged_df_train.merge(
+    #     features_df[["signal", "features"]], on="signal"
+    # )
+    #  # remove signals that don't have mfcc data
+    # merged_df_train = merged_df_train[merged_df_train["signal"].isin(x2d_df.columns)]
+    # assert len(merged_df_train) == x2d_df.shape[1], "Mismatch in number of samples between scalar and 2d features"
+    # assert len(merged_df_train) == 8802, f"Expected 8802 signals in training data but got {len(merged_df_train)}"
+    # print("scalar features:\n",merged_df_train.head())
+
+    # # prepare tensor of mfccs, padding to largest time dimension
+    # mfccs = []
+    # for col in x2d_df.columns:
+    #     # Get the two channels of variable-length arrays
+    #     arrays = [torch.tensor(arr, dtype=torch.float32) for arr in x2d_df[col]]
+    #     # Each `arr` is (13, t_i)
+    #     stacked = torch.stack(arrays, dim=0)  # shape: (2, 13, t_i)
+    #     mfccs.append(stacked)
+    # # Convert each to (t_i, 2, 13) for pad_sequence
+    # seqs = [x.permute(2, 0, 1) for x in mfccs]
+    # # Pad to (batch, max_t, 2, 13)
+    # padded = pad_sequence(seqs, batch_first=True)
+    # # Move back to (batch, 2, 13, max_t)
+    # padded = padded.permute(0, 2, 3, 1)
+    # assert padded.shape[0] == len(merged_df_train), "Mismatch in number of samples between scalar and 2d features"
+    # assert padded.shape[1] == num_2d_channels, "Mismatch in number of 2d channels"
+    # assert padded.shape[2] == 13, "Expected 13 MFCC coefficients"
+    # x2d = padded
+    # print(f"x2d shape: {x2d.shape}")
+
+    # # create input tensor of scalar features
+    # input_scalar_features = merged_df_train[["stoi", "whisper", "features"]].values
+    # scalar_tensor = torch.tensor(input_scalar_features, dtype=torch.float32)
+
+    # # create dummy data for 1d feature over max time dimension
+    # x1d = torch.randn(len(merged_df_train), num_1d_channels, x2d.shape[-1])
+    # print(f"x1d shape: {x1d.shape}")
+
+    # # create dataset combining multimodal features
+    # dataset = torch.utils.data.TensorDataset(x1d, x2d, scalar_tensor)
+    # dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
+
+    # # Run inference
+    # outputs = []
+    # with torch.no_grad():
+    #     for x1d_batch, x2d_batch, scalar_batch in dataloader:
+    #         x1d = x1d_batch.to(device)
+    #         x2d = x2d_batch.to(device)
+    #         scalar = scalar_batch.to(device)
+    #         output = model(x1d, x2d, scalar)
+    #         value = output.detach().cpu().item()
+    #         outputs.append(value)
+    # print(outputs)
+    # # save outputs to csv
+    # merged_df_train["predicted_correctness"] = outputs
+    # output_csv_path = f"{cfg.data.dataset}.train.{model.__class__.__name__}.inference.csv"
+    # merged_df_train.to_csv(output_csv_path, index=False)
+    # logger.info(f"Train inference results saved to {output_csv_path}")
+
+    # repeat for validation set
+    # load mfcc data
+    mfcc_dir = "/mnt/d/cadenza_extracted_features/mfccs_cmvn_valid/mfcc/"
+    x2d_dfs = []
+    for file in os.listdir(mfcc_dir):
+        if file.endswith(".json"):
+            print(f"Processing file: {file}")
+            mfcc_path = os.path.join(mfcc_dir, file)
+            mfcc_df = pd.read_json(mfcc_path)
+            x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
+    x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
+
     # gather STOI score, whisper score, and VAR dB as input features from jsonl files
-    stoi_df = load_features(cfg, "train", "stoi", None)
-    whisper_df = load_features(cfg, "train", "whisper", None)
-    features_df = load_features(cfg, "train", "features", "VAR (dB)")
+    stoi_df = load_features(cfg, "valid", "stoi", None)
+    whisper_df = load_features(cfg, "valid", "whisper", None)
+    features_df = load_features(cfg, "valid", "features", "VAR (dB)")
     # use z-score normalization for VAR (dB)
     mean_var = features_df["features"].mean()
     std_var = features_df["features"].std()
@@ -411,50 +517,67 @@ def run_inference(cfg: DictConfig) -> None:
     print("min VAR (dB): ", features_df["features"].min())
     print("max VAR (dB): ", features_df["features"].max())
     # merge dataframes on 'signal' column
-    merged_df_train = stoi_df.merge(whisper_df[["signal", "whisper"]], on="signal")
-    merged_df_train = merged_df_train.merge(
-        features_df[["signal", "features"]], on="signal"
-    )
-    print(merged_df_train.head())
-    # create input tensor
-    input_features = merged_df_train[["stoi", "whisper", "features"]].values
-    input_tensor = torch.tensor(input_features, dtype=torch.float32)
-
-    # Run inference
-    with torch.no_grad():
-        outputs = model(input_tensor)
-        print(outputs)
-        # save outputs to csv
-        merged_df_train["predicted_correctness"] = outputs.numpy()
-        output_csv_path = f"{cfg.data.dataset}.train.mlp_scalar_features.inference.csv"
-        merged_df_train.to_csv(output_csv_path, index=False)
-        logger.info(f"Inference results saved to {output_csv_path}")
-
-    # repeat for validation set
-    stoi_df = load_features(cfg, "valid", "stoi", None)
-    whisper_df = load_features(cfg, "valid", "whisper", None)
-    features_df = load_features(cfg, "valid", "features", "VAR (dB)")
-    # merge dataframes on 'signal' column
     merged_df_valid = stoi_df.merge(whisper_df[["signal", "whisper"]], on="signal")
     merged_df_valid = merged_df_valid.merge(
         features_df[["signal", "features"]], on="signal"
     )
-    print(merged_df_valid.head())
-    # create input tensor
-    input_features = merged_df_valid[["stoi", "whisper", "features"]].values
-    input_tensor = torch.tensor(input_features, dtype=torch.float32)
+    # remove signals that don't have mfcc data
+    merged_df_valid = merged_df_valid[merged_df_valid["signal"].isin(x2d_df.columns)]
+    assert len(merged_df_valid) == x2d_df.shape[1], "Mismatch in number of samples between scalar and 2d features"
+    assert len(merged_df_valid) == 1175, f"Expected 1175 signals in validation data but got {len(merged_df_valid)}"
+    print("scalar features:\n",merged_df_valid.head())
+
+    # prepare tensor of mfccs, padding to largest time dimension
+    mfccs = []
+    for col in x2d_df.columns:
+        # Get the two channels of variable-length arrays
+        arrays = [torch.tensor(arr, dtype=torch.float32) for arr in x2d_df[col]]
+        # Each `arr` is (13, t_i)
+        stacked = torch.stack(arrays, dim=0)  # shape: (2, 13, t_i)
+        mfccs.append(stacked)
+    # Convert each to (t_i, 2, 13) for pad_sequence
+    seqs = [x.permute(2, 0, 1) for x in mfccs]
+    # Pad to (batch, max_t, 2, 13)
+    padded = pad_sequence(seqs, batch_first=True)
+    # Move back to (batch, 2, 13, max_t)
+    padded = padded.permute(0, 2, 3, 1)
+    assert padded.shape[0] == len(merged_df_valid), "Mismatch in number of samples between scalar and 2d features"
+    assert padded.shape[1] == num_2d_channels, "Mismatch in number of 2d channels"
+    assert padded.shape[2] == 13, "Expected 13 MFCC coefficients"
+    x2d = padded
+    print(f"x2d shape: {x2d.shape}")
+
+    # create input tensor of scalar features
+    input_scalar_features = merged_df_valid[["stoi", "whisper", "features"]].values
+    scalar_tensor = torch.tensor(input_scalar_features, dtype=torch.float32)
+
+    # create dummy data for 1d feature over max time dimension
+    x1d = torch.randn(len(merged_df_valid), num_1d_channels, x2d.shape[-1])
+    print(f"x1d shape: {x1d.shape}")
+
+    dataset = torch.utils.data.TensorDataset(x1d, x2d, scalar_tensor)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
+    
 
     # Run inference
+    outputs = []
     with torch.no_grad():
-        outputs = model(input_tensor)
-        print(outputs)
-        # save outputs to csv
-        merged_df_valid["predicted_correctness"] = outputs.numpy()
-        output_csv_path = f"{cfg.data.dataset}.valid.mlp_scalar_features.inference.csv"
-        merged_df_valid.to_csv(output_csv_path, index=False)
-        logger.info(f"Inference results saved to {output_csv_path}")
+        for batch in dataloader:
+            x1d_batch, x2d_batch, scalar_batch = batch
+            x1d = x1d_batch.to(device)
+            x2d = x2d_batch.to(device)
+            scalar = scalar_batch.to(device)
+            output = model(x1d, x2d, scalar)
+            value = output.detach().cpu().item()
+            outputs.append(value)
+    print(outputs)
+    # save outputs to csv
+    merged_df_valid["predicted_correctness"] = outputs
+    output_csv_path = f"{cfg.data.dataset}.valid.{model.__class__.__name__}.inference.csv"
+    merged_df_valid.to_csv(output_csv_path, index=False)
+    logger.info(f"Inference results saved to {output_csv_path}")
 
 
 if __name__ == "__main__":
-    run_train_model()
+    # run_train_model()
     run_inference()
