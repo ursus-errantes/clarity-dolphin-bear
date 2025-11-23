@@ -31,12 +31,22 @@ class temporal_attention_pool(nn.Module):
         mask: tensor of shape (batch_size, time_steps) indicating valid elements
         mask is currently not used but will be needed for batching variable-length inputs
         """
-        # Compute attention scores
-        attn_scores = self.attention(x.permute(0, 2, 1))  # shape: (batch_size, time_steps, input_dim) -> (batch_size, time_steps, 1)
-        attn_weights = F.softmax(attn_scores, dim=1)  # shape: (batch_size, time_steps, 1)
+        # x: (batch, input_dim, time_steps) -> permute to (batch, time_steps, input_dim)
+        seq = x.permute(0, 2, 1)
+        # Compute attention scores -> (batch, time_steps, 1) -> squeeze -> (batch, time_steps)
+        attn_scores = self.attention(seq).squeeze(-1)
 
-        # Weighted sum of inputs
-        pooled = torch.sum(attn_weights * x.permute(0, 2, 1), dim=1)  # shape: (batch_size, input_dim)
+        if mask is not None:
+            # mask: (batch, time_steps) boolean (True=valid). If it's float/int, convert.
+            if mask.dtype != torch.bool:
+                mask = mask.bool()
+            # Set scores for invalid positions to a large negative value before softmax
+            attn_scores = attn_scores.masked_fill(~mask, float("-1e9"))
+
+        attn_weights = F.softmax(attn_scores, dim=1).unsqueeze(-1)  # (batch, time_steps, 1)
+
+        # Weighted sum of inputs -> (batch, input_dim)
+        pooled = torch.sum(attn_weights * seq, dim=1)
         return pooled
     
 
@@ -106,7 +116,7 @@ class multimodal_conv_mlp(nn.Module):
         self.k = k
 
 
-    def forward(self, x1d_left, x1d_right, x2d, x_scalar, mask=None):
+    def forward(self, x1d_left, x1d_right, x2d, x_scalar, mask1d=None, mask2d=None):
         """
         x1d_left: tensor of shape (batch_size, c1_in, time_steps)
         x1d_right: tensor of shape (batch_size, c1_in, time_steps)
@@ -115,19 +125,19 @@ class multimodal_conv_mlp(nn.Module):
         mask: tensor of shape (batch_size, time_steps) indicating valid elements (needed for batching variable-length inputs)
         """
         # Process 1D features
-        x1d_left = self.encoder_1d_left(x1d_left)  # (batch_size, 512, time_steps) -> (batch_size, 64, time_steps)
-        x1d_left = self.norm_1d_left(x1d_left.permute(0, 2, 1)).permute(0, 2, 1) # normalize over feature dimension
-        x1d_left = self.attn_pool_1d_left(x1d_left, mask)  # shape: (batch_size, 64)
-        x1d_right = self.encoder_1d_right(x1d_right)  # (batch_size, 512, time_steps) -> (batch_size, 64, time_steps)
-        x1d_right = self.norm_1d_right(x1d_right.permute(0, 2, 1)).permute(0, 2, 1) # normalize over feature dimension
-        x1d_right = self.attn_pool_1d_right(x1d_right, mask)  # shape: (batch_size, 64)
+        x1d_left = self.encoder_1d_left(x1d_left)  # (batch_size, c1_in, time_steps) -> (batch_size, 64, time_steps)
+        x1d_left = self.norm_1d_left(x1d_left.permute(0, 2, 1)).permute(0, 2, 1)  # normalize over feature dimension
+        x1d_left = self.attn_pool_1d_left(x1d_left, mask1d)  # shape: (batch_size, 64)
+        x1d_right = self.encoder_1d_right(x1d_right)  # (batch_size, c1_in, time_steps) -> (batch_size, 64, time_steps)
+        x1d_right = self.norm_1d_right(x1d_right.permute(0, 2, 1)).permute(0, 2, 1)  # normalize over feature dimension
+        x1d_right = self.attn_pool_1d_right(x1d_right, mask1d)  # shape: (batch_size, 64)
 
         # Process 2D features
         x2d = self.encoder_2d(x2d)  # shape: (batch_size, 64, freq_bins, time_steps)
         x2d = torch.mean(x2d, dim=2)  # average over frequency dimension -> (batch_size, 64, time_steps)
         x2d = self.projection_2d(x2d)  # shape: (batch_size, 64, time_steps)
-        x2d = self.norm_2d(x2d.permute(0, 2, 1)).permute(0, 2, 1) # normalize over feature dimension
-        x2d = self.attn_pool_2d(x2d, mask)  # shape: (batch_size, 64)
+        x2d = self.norm_2d(x2d.permute(0, 2, 1)).permute(0, 2, 1)  # normalize over feature dimension
+        x2d = self.attn_pool_2d(x2d, mask2d)  # shape: (batch_size, 64)
 
         # Process scalar features
         x_scalar = self.mlp_scalar(x_scalar)  # shape: (batch_size, 32)
@@ -286,18 +296,31 @@ def collate_batch(samples):
     labels = torch.stack([s[4] for s in samples], dim=0)
 
     # pad left/right (list of (t, d)) -> pad_sequence -> (batch, max_t, d)
+    # also compute boolean masks indicating valid (non-padded) time steps
+    lengths_left = [l.shape[0] for l in lefts]
     padded_left = pad_sequence(lefts, batch_first=True)
     padded_right = pad_sequence(rights, batch_first=True)
     # convert to (batch, d, max_t)
     padded_left = padded_left.permute(0, 2, 1)
     padded_right = padded_right.permute(0, 2, 1)
 
+    # build mask for 1D sequences: shape (batch, max_t)
+    max_t = padded_left.shape[-1]
+    lengths_tensor = torch.tensor(lengths_left, dtype=torch.long)
+    mask1d = (torch.arange(max_t).unsqueeze(0) < lengths_tensor.unsqueeze(1))
+
     # pad x2d: inputs are (2, freq, t) -> permute to (t, 2, freq) for pad_sequence
     seqs_x2d = [x.permute(2, 0, 1) for x in x2ds]
+    lengths_x2d = [s.shape[0] for s in seqs_x2d]
     padded_x2d = pad_sequence(seqs_x2d, batch_first=True)  # (batch, max_t2, 2, freq)
     padded_x2d = padded_x2d.permute(0, 2, 3, 1)  # (batch, 2, freq, max_t2)
 
-    return padded_left, padded_right, padded_x2d, scalars, labels
+    # build mask for 2D sequences: shape (batch, max_t2)
+    max_t2 = padded_x2d.shape[-1]
+    lengths_x2d_tensor = torch.tensor(lengths_x2d, dtype=torch.long)
+    mask2d = (torch.arange(max_t2).unsqueeze(0) < lengths_x2d_tensor.unsqueeze(1))
+
+    return padded_left, padded_right, padded_x2d, scalars, labels, mask1d, mask2d
 
 
 @hydra.main(config_path="configs", config_name="config", version_base=None)
@@ -413,16 +436,26 @@ def run_train_model(cfg: DictConfig) -> None:
         # Training phase
         model.train()
         train_loss = 0.0
-        for batch_x1d_left, batch_x1d_right, batch_x2d, batch_scalar, batch_y in train_loader:
+        for batch_x1d_left, batch_x1d_right, batch_x2d, batch_scalar, batch_y, batch_mask1d, batch_mask2d in train_loader:
             # move data to GPU if available
             batch_x1d_left = batch_x1d_left.to(device)
             batch_x1d_right = batch_x1d_right.to(device)
             batch_x2d = batch_x2d.to(device)
             batch_scalar = batch_scalar.to(device)
             batch_y = batch_y.to(device)
+            # masks are boolean tensors of shape (batch, time)
+            batch_mask1d = batch_mask1d.to(device)
+            batch_mask2d = batch_mask2d.to(device)
 
             optimizer.zero_grad()
-            outputs = model(batch_x1d_left, batch_x1d_right, batch_x2d, batch_scalar)
+            outputs = model(
+                batch_x1d_left,
+                batch_x1d_right,
+                batch_x2d,
+                batch_scalar,
+                mask1d=batch_mask1d,
+                mask2d=batch_mask2d,
+            )
             loss = criterion(outputs, batch_y)
             loss.backward()
             optimizer.step()
@@ -434,15 +467,24 @@ def run_train_model(cfg: DictConfig) -> None:
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for val_x1d_left, val_x1d_right, val_x2d, val_scalar, val_y in val_loader:
+            for val_x1d_left, val_x1d_right, val_x2d, val_scalar, val_y, val_mask1d, val_mask2d in val_loader:
                 # move data to GPU if available
                 val_x1d_left = val_x1d_left.to(device)
                 val_x1d_right = val_x1d_right.to(device)
                 val_x2d = val_x2d.to(device)
                 val_scalar = val_scalar.to(device)
                 val_y = val_y.to(device)
+                val_mask1d = val_mask1d.to(device)
+                val_mask2d = val_mask2d.to(device)
 
-                val_outputs = model(val_x1d_left, val_x1d_right, val_x2d, val_scalar)
+                val_outputs = model(
+                    val_x1d_left,
+                    val_x1d_right,
+                    val_x2d,
+                    val_scalar,
+                    mask1d=val_mask1d,
+                    mask2d=val_mask2d,
+                )
                 val_loss += criterion(val_outputs, val_y).item() * val_scalar.size(0) # average loss * batch size = total loss
         val_loss /= num_val
         val_losses.append(val_loss)
