@@ -362,8 +362,9 @@ def run_train_model(cfg: DictConfig) -> None:
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     num_epochs = 100
-    criterion = nn.MSELoss()
-    patience = 15
+    beta = 0.1
+    criterion = nn.SmoothL1Loss(beta=beta)
+    patience = 10
     best_val_loss = float("inf")
     epochs_no_improve = 0
     best_model_state = None
