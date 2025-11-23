@@ -42,7 +42,7 @@ class temporal_attention_pool(nn.Module):
 
 class multimodal_conv_mlp(nn.Module):
     """Combines MLP for scalar features with CNN and attention pooling for 1d and 2d features."""
-    def __init__(self, c1_in, c2_in, scalar_dim, k=3.0, p_dropout=0.3):
+    def __init__(self, c1_in, c2_in, scalar_dim, k=1.0, p_dropout=0.3):
         """
         Args:
             c1_in: number of input channels for 1D CNN
@@ -56,22 +56,20 @@ class multimodal_conv_mlp(nn.Module):
         # 1D CNN encoder for temporal features
         # left channel
         self.encoder_1d_left = nn.Sequential(
-            nn.Conv1d(c1_in, 256, kernel_size=3, padding=1),
+            nn.Conv1d(c1_in, 128, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv1d(256, 128, kernel_size=3, padding=1),
+            nn.Conv1d(128, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout(p_dropout),
         )
-        self.attn_pool_1d_left = temporal_attention_pool(128)
+        self.attn_pool_1d_left = temporal_attention_pool(64)
         # right channel
         self.encoder_1d_right = nn.Sequential(
-            nn.Conv1d(c1_in, 256, kernel_size=3, padding=1),
+            nn.Conv1d(c1_in, 128, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv1d(256, 128, kernel_size=3, padding=1),
+            nn.Conv1d(128, 64, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Dropout(p_dropout),
         )
-        self.attn_pool_1d_right = temporal_attention_pool(128)
+        self.attn_pool_1d_right = temporal_attention_pool(64)
 
         # 2D CNN encoder for spectro-temporal features
         self.encoder_2d = nn.Sequential(
@@ -79,7 +77,6 @@ class multimodal_conv_mlp(nn.Module):
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=(3,3), padding=(1,1)),
             nn.ReLU(),
-            nn.Dropout(p_dropout),
         )
         # projection after frequency pooling
         self.projection_2d = nn.Conv1d(64, 64, kernel_size=1) # learn linear weights for each channel per time step
@@ -89,7 +86,6 @@ class multimodal_conv_mlp(nn.Module):
         self.mlp_scalar = nn.Sequential(
             nn.Linear(scalar_dim, 32),
             nn.ReLU(),
-            nn.Dropout(p_dropout),
         )
 
         # final MLP concatenating the summaries of the three feature types
@@ -105,6 +101,7 @@ class multimodal_conv_mlp(nn.Module):
         )
         # sigmoid steepness factor
         self.k = k
+        
 
     def forward(self, x1d_left, x1d_right, x2d, x_scalar, mask=None):
         """
@@ -311,8 +308,9 @@ def run_train_model(cfg: DictConfig) -> None:
     num_scalar_features = 3
     num_1d_channels = 512  # whisper encoder embedding size
     num_2d_channels = 2  # MFCCs in stereo
-    k = 1.0
-    p_dropout = 0.3
+    beta = 0.1  # for SmoothL1Loss
+    k = 1.0 # sigmoid steepness
+    p_dropout = 0.1
     # model = mlp_scalar_features(num_scalar_features, k=k, p_dropout=p_dropout)
     model = multimodal_conv_mlp(
         num_1d_channels, num_2d_channels, num_scalar_features, k=k, p_dropout=p_dropout
@@ -362,7 +360,6 @@ def run_train_model(cfg: DictConfig) -> None:
     model.train()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
     num_epochs = 100
-    beta = 0.1
     criterion = nn.SmoothL1Loss(beta=beta)
     patience = 10
     best_val_loss = float("inf")
