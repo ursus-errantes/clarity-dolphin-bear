@@ -113,6 +113,102 @@ def compute_correctness(
     return results.hits / total_words
 
 
+def get_whisper_encoder_embeddings(
+    asr_model: Module, signal: np.ndarray, sample_rate: int, device: str | None = None
+) -> np.ndarray:
+    """Return Whisper encoder outputs for a single-channel waveform as a numpy array.
+
+    Args:
+        asr_model: object returned by whisper.load_model(...)
+        signal: 1-D numpy array (audio samples)
+        sample_rate: sample rate of the signal
+        device: optional device string ("cuda"/"cpu"). If None, auto-selects.
+
+    Returns:
+        numpy.ndarray with shape (seq_len, d_model)
+    """
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Resolve wrapper -> underlying nn.Module
+    model = getattr(asr_model, "model", asr_model)
+    model = model.to(device)
+    model.eval()
+
+    # Normalize/convert input
+    if signal.dtype != np.float32:
+        if np.issubdtype(signal.dtype, np.integer):
+            signal = signal.astype(np.float32) / np.iinfo(signal.dtype).max
+        else:
+            signal = signal.astype(np.float32)
+
+    # Resample to 16 kHz if necessary
+    target_sr = 16000
+    if sample_rate != target_sr:
+        try:
+            import torchaudio
+
+            sig_t = torch.from_numpy(signal)
+            sig_t = torchaudio.functional.resample(sig_t, orig_freq=sample_rate, new_freq=target_sr)
+            audio = sig_t.float()
+        except Exception:
+            try:
+                import librosa
+
+                resampled = librosa.resample(signal, orig_sr=sample_rate, target_sr=target_sr)
+                audio = torch.from_numpy(resampled).float()
+            except Exception:
+                # last resort: use scipy
+                from scipy.signal import resample_poly
+
+                gcd = np.gcd(sample_rate, target_sr)
+                up = target_sr // gcd
+                down = sample_rate // gcd
+                resampled = resample_poly(signal, up, down)
+                audio = torch.from_numpy(resampled).float()
+    else:
+        audio = torch.from_numpy(signal).float()
+
+    audio = audio.to(device)
+
+    # Make log-mel spectrogram (Whisper helper expects 1-D audio tensor)
+    mel = whisper.log_mel_spectrogram(audio)
+    mel = mel.unsqueeze(0).to(device)  # (1, n_mel, T)
+
+    # original time frames (number of mel frames)
+    orig_t = mel.shape[-1]
+
+    # base.en model expects 3000 time frames (~30s)
+    expected_len = 3000
+
+    print("expected_len (frames):", expected_len)
+    print("mel shape (n_mel, T):", mel.shape)
+
+    with torch.no_grad():
+        t = orig_t
+        # If shorter than expected, pad; if longer, trim to expected_len
+        if t < expected_len:
+            logger.info("Padding mel from %d to %d frames", t, expected_len)
+            mel_proc = torch.nn.functional.pad(mel, (0, expected_len - t))
+        else:
+            if t > expected_len:
+                logger.info("Trimming mel from %d to %d frames", t, expected_len)
+                mel_proc = mel[:, :, :expected_len]
+
+        print("mel_proc shape (1, n_mel, T_proc):", mel_proc.shape)
+
+        enc = model.encoder(mel_proc)
+
+        if isinstance(enc, tuple):
+            enc = enc[0]
+
+        enc = enc.squeeze(0)  # (expected_len, d_model)
+
+        # Slice to original length so returned embeddings match input length
+        enc = enc[:orig_t].cpu().numpy()
+
+    return enc
+
+
 def run_asr_from_mixture(
     dataroot: Path, records: list, results_file: Path, cfg: DictConfig
 ) -> None:
@@ -140,6 +236,25 @@ def run_asr_from_mixture(
 
         # Compute ASR
         correct = compute_asr_for_signal(cfg, record, signal_to_whisper, asr_model)
+
+        # Optionally compute and save encoder embeddings per channel
+        if getattr(cfg.baseline, "save_embeddings", False):
+            try:
+                emb_dir = dataroot / "embeddings"
+                emb_dir.mkdir(parents=True, exist_ok=True)
+
+                # signal_to_whisper expected shape (n_samples, channels)
+                left = signal_to_whisper[:, 0]
+                right = signal_to_whisper[:, 1]
+
+                emb_left = get_whisper_encoder_embeddings(asr_model, left, cfg.data.sample_rate, device=device)
+                emb_right = get_whisper_encoder_embeddings(asr_model, right, cfg.data.sample_rate, device=device)
+                print(f"emb_left shape: {emb_left.shape}, emb_right shape: {emb_right.shape}")
+
+                np.save(emb_dir / f"{signal_name}.{cfg.baseline.system}.left.npy", emb_left)
+                np.save(emb_dir / f"{signal_name}.{cfg.baseline.system}.right.npy", emb_right)
+            except Exception:
+                logger.exception("Failed to compute/save embeddings for %s", signal_name)
 
         # Results are appended to the results file to allow interruption
         result = {"signal": signal_name, f"{cfg.baseline.system}": correct}

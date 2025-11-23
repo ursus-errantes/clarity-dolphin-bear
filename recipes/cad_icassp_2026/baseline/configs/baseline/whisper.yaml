@@ -7,3 +7,4 @@ batch: 1
 n_batches: 1
 
 reference: processed
+save_embeddings: true
