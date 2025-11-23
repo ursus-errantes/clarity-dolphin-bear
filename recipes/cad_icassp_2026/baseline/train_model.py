@@ -104,7 +104,6 @@ class multimodal_conv_mlp(nn.Module):
         )
         # sigmoid steepness factor
         self.k = k
-        self.norm = nn.LayerNorm(64)
 
 
     def forward(self, x1d_left, x1d_right, x2d, x_scalar, mask=None):
@@ -365,7 +364,23 @@ def run_train_model(cfg: DictConfig) -> None:
 
     # define parameters for training
     model.train()
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    lr = 1e-4
+    wd = 1e-3
+    # LayerNorm and biases should not have weight decay
+    decay = []
+    no_decay = []
+    for name, param in model.named_parameters():
+        if param.ndim == 1 or "bias" in name or "norm" in name.lower():
+            no_decay.append(param)
+        else:
+            decay.append(param)
+    optimizer = torch.optim.Adam(
+        [
+            {"params": decay, "weight_decay": wd},
+            {"params": no_decay, "weight_decay": 0.0},
+        ],
+        lr=lr,
+    )
     num_epochs = 100
     criterion = nn.SmoothL1Loss(beta=beta)
     patience = 10
@@ -391,7 +406,7 @@ def run_train_model(cfg: DictConfig) -> None:
     )
 
     logger.info(
-        f"Training model with parameters:\n batch size {batch_size}, sigmoid steepness {k}, dropout probability {p_dropout}, optimizer Adam, loss MSE, num_epochs {num_epochs}, early stopping patience {patience}"
+        f"Training model with parameters:\n batch size {batch_size}, sigmoid steepness {k}, dropout probability {p_dropout}, optimizer Adam, lr {lr}, weight decay {wd}, loss {criterion}, beta {beta}, num_epochs {num_epochs}, early stopping patience {patience}"
     )
 
     for epoch in range(num_epochs):
