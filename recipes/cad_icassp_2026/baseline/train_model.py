@@ -42,7 +42,7 @@ class temporal_attention_pool(nn.Module):
 
 class multimodal_conv_mlp(nn.Module):
     """Combines MLP for scalar features with CNN and attention pooling for 1d and 2d features."""
-    def __init__(self, c1_in, c2_in, scalar_dim, k=1.0, p_dropout=0.3):
+    def __init__(self, c1_in, c2_in, scalar_dim, k=1.0, p_dropout=0.1):
         """
         Args:
             c1_in: number of input channels for 1D CNN
@@ -61,6 +61,7 @@ class multimodal_conv_mlp(nn.Module):
             nn.Conv1d(128, 64, kernel_size=3, padding=1),
             nn.ReLU(),
         )
+        self.norm_1d_left = nn.LayerNorm(64)
         self.attn_pool_1d_left = temporal_attention_pool(64)
         # right channel
         self.encoder_1d_right = nn.Sequential(
@@ -69,6 +70,7 @@ class multimodal_conv_mlp(nn.Module):
             nn.Conv1d(128, 64, kernel_size=3, padding=1),
             nn.ReLU(),
         )
+        self.norm_1d_right = nn.LayerNorm(64)
         self.attn_pool_1d_right = temporal_attention_pool(64)
 
         # 2D CNN encoder for spectro-temporal features
@@ -80,6 +82,7 @@ class multimodal_conv_mlp(nn.Module):
         )
         # projection after frequency pooling
         self.projection_2d = nn.Conv1d(64, 64, kernel_size=1) # learn linear weights for each channel per time step
+        self.norm_2d = nn.LayerNorm(64)
         self.attn_pool_2d = temporal_attention_pool(64)
 
         # simple MLP for scalar features
@@ -90,7 +93,7 @@ class multimodal_conv_mlp(nn.Module):
 
         # final MLP concatenating the summaries of the three feature types
         self.final_mlp = nn.Sequential(
-            nn.Linear(128 + 128 + 64 + 32, 128),
+            nn.Linear(64 + 64 + 64 + 32, 128),
             # nn.BatchNorm1d(64), # using batch size 1 for testing, so batchnorm not appropriate
             nn.ReLU(),
             nn.Dropout(p_dropout),
@@ -101,7 +104,8 @@ class multimodal_conv_mlp(nn.Module):
         )
         # sigmoid steepness factor
         self.k = k
-        
+        self.norm = nn.LayerNorm(64)
+
 
     def forward(self, x1d_left, x1d_right, x2d, x_scalar, mask=None):
         """
@@ -112,22 +116,25 @@ class multimodal_conv_mlp(nn.Module):
         mask: tensor of shape (batch_size, time_steps) indicating valid elements (needed for batching variable-length inputs)
         """
         # Process 1D features
-        x1d_left = self.encoder_1d_left(x1d_left)  # shape: (batch_size, 128, time_steps)
-        x1d_left = self.attn_pool_1d_left(x1d_left, mask)  # shape: (batch_size, 128)
-        x1d_right = self.encoder_1d_right(x1d_right)  # shape: (batch_size, 128, time_steps)
-        x1d_right = self.attn_pool_1d_right(x1d_right, mask)  # shape: (batch_size, 128)
+        x1d_left = self.encoder_1d_left(x1d_left)  # (batch_size, 512, time_steps) -> (batch_size, 64, time_steps)
+        x1d_left = self.norm_1d_left(x1d_left.permute(0, 2, 1)).permute(0, 2, 1) # normalize over feature dimension
+        x1d_left = self.attn_pool_1d_left(x1d_left, mask)  # shape: (batch_size, 64)
+        x1d_right = self.encoder_1d_right(x1d_right)  # (batch_size, 512, time_steps) -> (batch_size, 64, time_steps)
+        x1d_right = self.norm_1d_right(x1d_right.permute(0, 2, 1)).permute(0, 2, 1) # normalize over feature dimension
+        x1d_right = self.attn_pool_1d_right(x1d_right, mask)  # shape: (batch_size, 64)
 
         # Process 2D features
         x2d = self.encoder_2d(x2d)  # shape: (batch_size, 64, freq_bins, time_steps)
         x2d = torch.mean(x2d, dim=2)  # average over frequency dimension -> (batch_size, 64, time_steps)
         x2d = self.projection_2d(x2d)  # shape: (batch_size, 64, time_steps)
+        x2d = self.norm_2d(x2d.permute(0, 2, 1)).permute(0, 2, 1) # normalize over feature dimension
         x2d = self.attn_pool_2d(x2d, mask)  # shape: (batch_size, 64)
 
         # Process scalar features
         x_scalar = self.mlp_scalar(x_scalar)  # shape: (batch_size, 32)
 
         # Concatenate all summaries
-        combined = torch.cat([x1d_left, x1d_right, x2d, x_scalar], dim=-1)  # shape: (batch_size, 128 + 128 + 64 + 32)
+        combined = torch.cat([x1d_left, x1d_right, x2d, x_scalar], dim=-1)  # shape: (batch_size, 64 + 64 + 64 + 32)
 
         # Final MLP
         output = self.final_mlp(combined)  # shape: (batch_size, 1)
@@ -479,7 +486,7 @@ def run_inference(cfg: DictConfig) -> None:
     num_1d_channels = 0  # testing with 2d mfccs, not using 1d features for now
     num_2d_channels = 2  # MFCCs in stereo
     k = 1.0
-    p_dropout = 0.3
+    p_dropout = 0.1
     model = multimodal_conv_mlp(num_1d_channels, num_2d_channels, num_scalar_features, k=k, p_dropout=p_dropout)
 
     model_path = f"{cfg.data.dataset}.train.{model.__class__.__name__}.pth"
