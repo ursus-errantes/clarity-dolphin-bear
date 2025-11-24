@@ -91,7 +91,7 @@ def investigate_model_weights(model_path: str = "./exp/cadenza_data.train.mlp_sc
     plt.show()
 
 
-def compute_inference_rmse(filepath = "./exp/cadenza_data.train.mlp_scalar_features.inference.csv") -> float:
+def compute_inference_rmse(filepath = "./exp/cadenza_data.train.multimodal_conv_mlp.inference.csv") -> float:
     """Compute RMSE of inference results against correctness labels in train set."""
     df = pd.read_csv(filepath)
     if 'correctness' not in df.columns or 'predicted_correctness' not in df.columns:
