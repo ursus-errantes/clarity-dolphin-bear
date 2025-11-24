@@ -2,13 +2,13 @@ import json
 import logging
 import os
 from pathlib import Path
+
 import hydra
 from omegaconf import DictConfig
 import pandas as pd
-import torch
 import matplotlib.pyplot as plt
 import numpy as np
-
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
@@ -29,7 +29,6 @@ class temporal_attention_pool(nn.Module):
         """
         x: tensor of shape (batch_size, input_dim, time_steps)
         mask: tensor of shape (batch_size, time_steps) indicating valid elements
-        mask is currently not used but will be needed for batching variable-length inputs
         """
         # x: (batch, input_dim, time_steps) -> permute to (batch, time_steps, input_dim)
         seq = x.permute(0, 2, 1)
@@ -48,7 +47,7 @@ class temporal_attention_pool(nn.Module):
         # Weighted sum of inputs -> (batch, input_dim)
         pooled = torch.sum(attn_weights * seq, dim=1)
         return pooled
-    
+
 
 class multimodal_conv_mlp(nn.Module):
     """Combines MLP for scalar features with CNN and attention pooling for 1d and 2d features."""
@@ -231,13 +230,39 @@ class EmbeddingDataset(torch.utils.data.Dataset):
     - scalar: torch.Tensor shape (num_scalar_features,)
     - label: torch.Tensor shape (1,)
     """
-    def __init__(self, merged_df: pd.DataFrame, whisper_emb_dir: Path, x2d_df: pd.DataFrame, system: str):
+
+    def __init__(
+        self,
+        merged_df: pd.DataFrame,
+        whisper_emb_dir: Path,
+        x2d_df: pd.DataFrame,
+        system: str,
+        augment: bool = False,
+        swap_prob: float = 0.5,
+        noise_std: float = 0.0,
+    ):
         self.signals = merged_df["signal"].tolist()
         self.scalar_arr = merged_df[["stoi", "whisper", "features"]].values.astype(np.float32)
-        self.labels = merged_df["correctness"].values.astype(np.float32)
+
+        # Some splits (e.g. validation) may not have correctness labels.
+        # Support unlabeled datasets by creating a dummy label array of zeros
+        # so downstream collate/fwd code can uniformly expect a label tensor.
+        if "correctness" in merged_df.columns:
+            self.labels = merged_df["correctness"].values.astype(np.float32)
+        else:
+            logging.getLogger(__name__).warning(
+                "Merged DataFrame has no 'correctness' column; creating dummy zero labels."
+            )
+            self.labels = np.zeros((len(self.signals),), dtype=np.float32)
+
         self.whisper_emb_dir = Path(whisper_emb_dir)
         self.x2d_df = x2d_df
         self.system = system
+
+        # augmentation parameters
+        self.augment = bool(augment)
+        self.swap_prob = float(swap_prob)
+        self.noise_std = float(noise_std)
 
     def __len__(self):
         return len(self.signals)
@@ -275,7 +300,34 @@ class EmbeddingDataset(torch.utils.data.Dataset):
         scalar = torch.from_numpy(self.scalar_arr[idx]).float()
         label = torch.tensor(self.labels[idx], dtype=torch.float32).unsqueeze(0)
 
+        # Apply augmentation if enabled (only intended for training)
+        if self.augment:
+            left_t, right_t, x2d = self._augment(left_t, right_t, x2d)
+
         return left_t, right_t, x2d, scalar, label
+
+    def _augment(self, left_t: torch.Tensor, right_t: torch.Tensor, x2d: torch.Tensor):
+        """Apply data augmentation:
+        - With probability `swap_prob` swap left/right embeddings and swap the two MFCC channels together.
+        - Add Gaussian noise with std=`noise_std` to the MFCC tensor `x2d`.
+
+        left_t/right_t shapes: (time, d_model)
+        x2d shape: (2, freq, time)
+        Returns augmented (left_t, right_t, x2d)
+        """
+        # Decide whether to swap
+        if np.random.rand() < self.swap_prob:
+            # swap embeddings
+            left_t, right_t = right_t, left_t
+            # swap MFCC channels along channel dim 0
+            x2d = x2d[[1, 0], ...]
+
+        # Add Gaussian noise to MFCCs (in-place creation)
+        if self.noise_std > 0.0:
+            noise = torch.randn_like(x2d) * float(self.noise_std)
+            x2d = x2d + noise
+
+        return left_t, right_t, x2d
 
 
 def collate_batch(samples):
@@ -333,7 +385,7 @@ def run_train_model(cfg: DictConfig) -> None:
     logger.info(f"Using device: {device}")
 
     # Define model
-    batch_size = 1
+    batch_size = 32
     num_scalar_features = 3
     num_1d_channels = 512  # whisper encoder embedding size
     num_2d_channels = 2  # MFCCs in stereo
@@ -380,10 +432,32 @@ def run_train_model(cfg: DictConfig) -> None:
     # remove signals that don't have mfcc data
     merged_df = merged_df[merged_df["signal"].isin(x2d_df.columns)]
     assert len(merged_df) == x2d_df.shape[1], "Mismatch in number of samples between scalar and 2d features"
+    # Sanity check: expected train set size
+    assert len(merged_df) == 8802, f"Expected 8802 training samples but got {len(merged_df)}"
     print("scalar features:\n",merged_df.head())
 
-    # Create a streaming dataset that loads embeddings per-sample on demand
-    dataset = EmbeddingDataset(merged_df, whisper_emb_dir, x2d_df, system=cfg.baseline.system)
+    # Create streaming datasets: one with augmentation enabled for training
+    # and one without augmentation for validation. We will split indices so
+    # augmentation only affects the training subset.
+    # Default augmentation hyperparameters
+    aug_swap_prob = 0.5
+    aug_noise_std = 0.01
+    dataset_aug = EmbeddingDataset(
+        merged_df,
+        whisper_emb_dir,
+        x2d_df,
+        system=cfg.baseline.system,
+        augment=True,
+        swap_prob=aug_swap_prob,
+        noise_std=aug_noise_std,
+    )
+    dataset_noaug = EmbeddingDataset(
+        merged_df,
+        whisper_emb_dir,
+        x2d_df,
+        system=cfg.baseline.system,
+        augment=False,
+    )
 
     # define parameters for training
     model.train()
@@ -415,12 +489,16 @@ def run_train_model(cfg: DictConfig) -> None:
 
     # Split train/val (simple split)
     val_split = 0.1
-    num_samples = len(dataset)
+    num_samples = len(dataset_noaug)
     num_val = int(num_samples * val_split)
     num_train = num_samples - num_val
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [num_train, num_val]
-    )
+    # Create deterministic random split indices and apply to the two datasets
+    indices = np.arange(num_samples)
+    np.random.shuffle(indices)
+    train_idx = indices[:num_train].tolist()
+    val_idx = indices[num_train:].tolist()
+    train_dataset = torch.utils.data.Subset(dataset_aug, train_idx)
+    val_dataset = torch.utils.data.Subset(dataset_noaug, val_idx)
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_batch
     )
@@ -539,8 +617,8 @@ def run_inference(cfg: DictConfig) -> None:
     logger.info(f"Using device: {device}")
 
     num_scalar_features = 3
-    # num_1d_channels = 1
-    num_1d_channels = 0  # testing with 2d mfccs, not using 1d features for now
+    # Use the same 1D channel size used for training so Conv1d layers are valid
+    num_1d_channels = 512
     num_2d_channels = 2  # MFCCs in stereo
     k = 1.0
     p_dropout = 0.1
@@ -553,171 +631,88 @@ def run_inference(cfg: DictConfig) -> None:
     model.to(device) # move model to GPU if available
     model.eval()
 
-    # # load mfcc data
-    # mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
-    # x2d_dfs = []
-    # for file in os.listdir(mfcc_dir):
-    #     if file.endswith(".json"):
-    #         print(f"Processing file: {file}")
-    #         mfcc_path = os.path.join(mfcc_dir, file)
-    #         mfcc_df = pd.read_json(mfcc_path)
-    #         x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
-    # x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
+    # choose split for inference; allow cfg.split to specify otherwise default to 'valid'
+    split = getattr(cfg, "split", "valid")
+    logger.info(f"Preparing inference data for split={split}")
 
-    # # gather STOI score, whisper score, and VAR dB as input features from jsonl files
-    # stoi_df = load_features(cfg, "train", "stoi", None)
-    # whisper_df = load_features(cfg, "train", "whisper", None)
-    # features_df = load_features(cfg, "train", "features", "VAR (dB)")
-    # # use z-score normalization for VAR (dB)
-    # mean_var = features_df["features"].mean()
-    # std_var = features_df["features"].std()
-    # features_df["features"] = (features_df["features"] - mean_var) / std_var
-    # print("min VAR (dB): ", features_df["features"].min())
-    # print("max VAR (dB): ", features_df["features"].max())
-    # # merge dataframes on 'signal' column
-    # merged_df_train = stoi_df.merge(whisper_df[["signal", "whisper"]], on="signal")
-    # merged_df_train = merged_df_train.merge(
-    #     features_df[["signal", "features"]], on="signal"
-    # )
-    #  # remove signals that don't have mfcc data
-    # merged_df_train = merged_df_train[merged_df_train["signal"].isin(x2d_df.columns)]
-    # assert len(merged_df_train) == x2d_df.shape[1], "Mismatch in number of samples between scalar and 2d features"
-    # assert len(merged_df_train) == 8802, f"Expected 8802 signals in training data but got {len(merged_df_train)}"
-    # print("scalar features:\n",merged_df_train.head())
+    # mfcc directories differ between train/valid on the host; mirror train logic
+    if split == "train":
+        mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
+    else:
+        mfcc_dir = "/mnt/d/cadenza_extracted_features/mfccs_cmvn_valid/mfcc/"
 
-    # # prepare tensor of mfccs, padding to largest time dimension
-    # mfccs = []
-    # for col in x2d_df.columns:
-    #     # Get the two channels of variable-length arrays
-    #     arrays = [torch.tensor(arr, dtype=torch.float32) for arr in x2d_df[col]]
-    #     # Each `arr` is (13, t_i)
-    #     stacked = torch.stack(arrays, dim=0)  # shape: (2, 13, t_i)
-    #     mfccs.append(stacked)
-    # # Convert each to (t_i, 2, 13) for pad_sequence
-    # seqs = [x.permute(2, 0, 1) for x in mfccs]
-    # # Pad to (batch, max_t, 2, 13)
-    # padded = pad_sequence(seqs, batch_first=True)
-    # # Move back to (batch, 2, 13, max_t)
-    # padded = padded.permute(0, 2, 3, 1)
-    # assert padded.shape[0] == len(merged_df_train), "Mismatch in number of samples between scalar and 2d features"
-    # assert padded.shape[1] == num_2d_channels, "Mismatch in number of 2d channels"
-    # assert padded.shape[2] == 13, "Expected 13 MFCC coefficients"
-    # x2d = padded
-    # print(f"x2d shape: {x2d.shape}")
-
-    # # create input tensor of scalar features
-    # input_scalar_features = merged_df_train[["stoi", "whisper", "features"]].values
-    # scalar_tensor = torch.tensor(input_scalar_features, dtype=torch.float32)
-
-    # # create dummy data for 1d feature over max time dimension
-    # x1d = torch.randn(len(merged_df_train), num_1d_channels, x2d.shape[-1])
-    # print(f"x1d shape: {x1d.shape}")
-
-    # # create dataset combining multimodal features
-    # dataset = torch.utils.data.TensorDataset(x1d, x2d, scalar_tensor)
-    # dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
-
-    # # Run inference
-    # outputs = []
-    # with torch.no_grad():
-    #     for x1d_batch, x2d_batch, scalar_batch in dataloader:
-    #         x1d = x1d_batch.to(device)
-    #         x2d = x2d_batch.to(device)
-    #         scalar = scalar_batch.to(device)
-    #         output = model(x1d, x2d, scalar)
-    #         value = output.detach().cpu().item()
-    #         outputs.append(value)
-    # print(outputs)
-    # # save outputs to csv
-    # merged_df_train["predicted_correctness"] = outputs
-    # output_csv_path = f"{cfg.data.dataset}.train.{model.__class__.__name__}.inference.csv"
-    # merged_df_train.to_csv(output_csv_path, index=False)
-    # logger.info(f"Train inference results saved to {output_csv_path}")
-
-    # repeat for validation set
-    # load mfcc data
-    mfcc_dir = "/mnt/d/cadenza_extracted_features/mfccs_cmvn_valid/mfcc/"
+    # load MFCCs (each file is a json with a single-column of signals)
     x2d_dfs = []
     for file in os.listdir(mfcc_dir):
         if file.endswith(".json"):
-            print(f"Processing file: {file}")
             mfcc_path = os.path.join(mfcc_dir, file)
             mfcc_df = pd.read_json(mfcc_path)
-            x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
-    x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
+            x2d_dfs.append(mfcc_df)
+    x2d_df = pd.concat(x2d_dfs, axis=1)
 
-    # gather STOI score, whisper score, and VAR dB as input features from jsonl files
-    stoi_df = load_features(cfg, "valid", "stoi", None)
-    whisper_df = load_features(cfg, "valid", "whisper", None)
-    features_df = load_features(cfg, "valid", "features", "VAR (dB)")
-    # use z-score normalization for VAR (dB)
+    # load scalar features (STOI, whisper score, VAR dB)
+    stoi_df = load_features(cfg, split, "stoi", None)
+    whisper_df = load_features(cfg, split, "whisper", None)
+    features_df = load_features(cfg, split, "features", "VAR (dB)")
+    # normalize VAR (dB) with z-score using the split statistics
     mean_var = features_df["features"].mean()
     std_var = features_df["features"].std()
     features_df["features"] = (features_df["features"] - mean_var) / std_var
-    print("min VAR (dB): ", features_df["features"].min())
-    print("max VAR (dB): ", features_df["features"].max())
-    # merge dataframes on 'signal' column
-    merged_df_valid = stoi_df.merge(whisper_df[["signal", "whisper"]], on="signal")
-    merged_df_valid = merged_df_valid.merge(
-        features_df[["signal", "features"]], on="signal"
-    )
-    # remove signals that don't have mfcc data
-    merged_df_valid = merged_df_valid[merged_df_valid["signal"].isin(x2d_df.columns)]
-    assert len(merged_df_valid) == x2d_df.shape[1], "Mismatch in number of samples between scalar and 2d features"
-    assert len(merged_df_valid) == 1175, f"Expected 1175 signals in validation data but got {len(merged_df_valid)}"
-    print("scalar features:\n",merged_df_valid.head())
 
-    # prepare tensor of mfccs, padding to largest time dimension
-    mfccs = []
-    for col in x2d_df.columns:
-        # Get the two channels of variable-length arrays
-        arrays = [torch.tensor(arr, dtype=torch.float32) for arr in x2d_df[col]]
-        # Each `arr` is (13, t_i)
-        stacked = torch.stack(arrays, dim=0)  # shape: (2, 13, t_i)
-        mfccs.append(stacked)
-    # Convert each to (t_i, 2, 13) for pad_sequence
-    seqs = [x.permute(2, 0, 1) for x in mfccs]
-    # Pad to (batch, max_t, 2, 13)
-    padded = pad_sequence(seqs, batch_first=True)
-    # Move back to (batch, 2, 13, max_t)
-    padded = padded.permute(0, 2, 3, 1)
-    assert padded.shape[0] == len(merged_df_valid), "Mismatch in number of samples between scalar and 2d features"
-    assert padded.shape[1] == num_2d_channels, "Mismatch in number of 2d channels"
-    assert padded.shape[2] == 13, "Expected 13 MFCC coefficients"
-    x2d = padded
-    print(f"x2d shape: {x2d.shape}")
+    merged_df = stoi_df.merge(whisper_df[["signal", "whisper"]], on="signal")
+    merged_df = merged_df.merge(features_df[["signal", "features"]], on="signal")
+    # keep only signals that have MFCCs available
+    merged_df = merged_df[merged_df["signal"].isin(x2d_df.columns)]
+    # Quick sanity check for expected sizes
+    expected = 8802 if split == "train" else 1175
+    if len(merged_df) != x2d_df.shape[1]:
+        logger.warning(
+            f"Mismatch in number of samples between scalar and 2d features: merged_df={len(merged_df)} x2d_cols={x2d_df.shape[1]}"
+        )
+    assert len(merged_df) == expected, f"Expected {expected} samples for split='{split}' but got {len(merged_df)}"
 
-    # create input tensor of scalar features
-    input_scalar_features = merged_df_valid[["stoi", "whisper", "features"]].values
-    scalar_tensor = torch.tensor(input_scalar_features, dtype=torch.float32)
+    # whisper embeddings dir (same as training)
+    whisper_emb_dir = Path(cfg.data.cadenza_data_root) / cfg.data.dataset / "embeddings"
 
-    # create dummy data for 1d feature over max time dimension
-    x1d = torch.randn(len(merged_df_valid), num_1d_channels, x2d.shape[-1])
-    print(f"x1d shape: {x1d.shape}")
+    # Create streaming dataset and dataloader using the same EmbeddingDataset and collate_batch
+    dataset = EmbeddingDataset(merged_df, whisper_emb_dir, x2d_df, system=cfg.baseline.system)
+    inf_batch_size = getattr(cfg, "inference_batch_size", 32)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=inf_batch_size, shuffle=False, collate_fn=collate_batch)
 
-    dataset = torch.utils.data.TensorDataset(x1d, x2d, scalar_tensor)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
-    
-
-    # Run inference
+    # Run inference over the DataLoader (which returns masks)
     outputs = []
     with torch.no_grad():
-        for batch in dataloader:
-            x1d_batch, x2d_batch, scalar_batch = batch
-            x1d = x1d_batch.to(device)
-            x2d = x2d_batch.to(device)
-            scalar = scalar_batch.to(device)
-            output = model(x1d, x2d, scalar)
-            value = output.detach().cpu().item()
-            outputs.append(value)
-    print(outputs)
-    # save outputs to csv
-    merged_df_valid["predicted_correctness"] = outputs
-    output_csv_path = f"{cfg.data.dataset}.valid.{model.__class__.__name__}.inference.csv"
-    merged_df_valid.to_csv(output_csv_path, index=False)
+        for x1d_left, x1d_right, x2d_batch, scalar_batch, y_dummy, mask1d, mask2d in dataloader:
+            x1d_left = x1d_left.to(device)
+            x1d_right = x1d_right.to(device)
+            x2d_batch = x2d_batch.to(device)
+            scalar_batch = scalar_batch.to(device)
+            mask1d = mask1d.to(device)
+            mask2d = mask2d.to(device)
+
+            out = model(
+                x1d_left,
+                x1d_right,
+                x2d_batch,
+                scalar_batch,
+                mask1d=mask1d,
+                mask2d=mask2d,
+            )
+            # out shape: (batch, 1)
+            values = out.detach().cpu().squeeze(-1).tolist()
+            # ensure list
+            if isinstance(values, float):
+                values = [values]
+            outputs.extend(values)
+
+    # attach predictions to merged_df (keep original order)
+    merged_df = merged_df.reset_index(drop=True)
+    merged_df["predicted_correctness"] = outputs[: len(merged_df)]
+    output_csv_path = f"{cfg.data.dataset}.{split}.{model.__class__.__name__}.inference.csv"
+    merged_df.to_csv(output_csv_path, index=False)
     logger.info(f"Inference results saved to {output_csv_path}")
 
 
 if __name__ == "__main__":
-    run_train_model()
-    # run_inference()
+    # run_train_model()
+    run_inference()
