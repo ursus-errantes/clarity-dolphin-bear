@@ -3,4 +3,6 @@ defaults:
   - common
   - baseline: whisper  # stoi or whisper or features
 
-split: train
+split: valid
+resume_checkpoint: ./cadenza_data.train.simple_meanpool_scalar_mlp.epoch50.pth
+model_type: simple_meanpool_scalar_mlp
