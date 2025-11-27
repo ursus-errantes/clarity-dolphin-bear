@@ -192,29 +192,32 @@ class mlp_scalar_features(nn.Module):
 
 
 class simple_meanpool_scalar_mlp(nn.Module):
-    """Simple model that uses only 1D whisper embeddings (left/right) and scalar features.
-    It performs masked mean pooling over the temporal dimension (no Conv1d, no attention),
-    then projects pooled embeddings and concatenates with scalar features before an MLP.
+    """Simple model that uses 1D whisper embeddings (left/right), 2D MFCCs, and scalar features.
+    It performs mean pooling over frequency and masked mean pooling over time for MFCCs,
+    masked mean pooling for 1D embeddings, projects pooled vectors and concatenates
+    everything before an MLP.
     """
-    def __init__(self, c1_in, scalar_dim, proj_dim=64, k=1.0, p_dropout=0.1):
+    def __init__(self, c1_in, scalar_dim, proj_dim=32, c2_in=2, proj_dim2=32, k=1.0, p_dropout=0.1):
         super().__init__()
 
         # linear projection after mean pooling to reduce dimensionality
         self.proj_left = nn.Linear(c1_in, proj_dim)
         self.proj_right = nn.Linear(c1_in, proj_dim)
+        # projection for 2D MFCC pooled features
+        self.proj_2d = nn.Linear(c2_in, proj_dim2)
 
         # MLP for scalar features
         self.mlp_scalar = nn.Sequential(nn.Linear(scalar_dim, 32), nn.ReLU())
 
         # final classifier
         self.final_mlp = nn.Sequential(
-            nn.Linear(proj_dim * 2 + 32, 128),
+            nn.Linear(proj_dim * 2 + proj_dim2 + 32, 64),
             nn.ReLU(),
             nn.Dropout(p_dropout),
-            nn.Linear(128, 64),
+            nn.Linear(64, 32),
             nn.ReLU(),
             nn.Dropout(p_dropout),
-            nn.Linear(64, 1),
+            nn.Linear(32, 1),
         )
         self.k = k
 
@@ -234,11 +237,13 @@ class simple_meanpool_scalar_mlp(nn.Module):
         lengths = mask_f.sum(dim=-1).clamp(min=1.0)
         return summed / lengths
 
-    def forward(self, x1d_left, x1d_right, x_scalar, mask1d=None):
+    def forward(self, x1d_left, x1d_right, x2d, x_scalar, mask1d=None, mask2d=None):
         """
         x1d_left/right: (batch, c1_in, time)
+        x2d: (batch, c2_in, freq, time)
         x_scalar: (batch, scalar_dim)
         mask1d: (batch, time)
+        mask2d: (batch, time)
         """
         # pooled embeddings (batch, c1_in)
         pooled_left = self._masked_mean_pool(x1d_left, mask1d)
@@ -251,7 +256,18 @@ class simple_meanpool_scalar_mlp(nn.Module):
         # scalar embedding
         scalar_feat = self.mlp_scalar(x_scalar)
 
-        combined = torch.cat([left_feat, right_feat, scalar_feat], dim=-1)
+        # Process 2D MFCCs: average over frequency, then masked mean-pool over time
+        if x2d is None:
+            # fallback zero vector if no x2d provided
+            pooled_2d = torch.zeros((x1d_left.size(0), self.proj_2d.in_features), device=x1d_left.device)
+        else:
+            # x2d: (batch, c2, freq, time) -> mean over freq -> (batch, c2, time)
+            x2d_freq = x2d.mean(dim=2)
+            pooled_2d = self._masked_mean_pool(x2d_freq, mask2d)  # (batch, c2)
+        # project 2d pooled features
+        proj_2d = torch.relu(self.proj_2d(pooled_2d))
+
+        combined = torch.cat([left_feat, right_feat, proj_2d, scalar_feat], dim=-1)
         out = self.final_mlp(combined)
         out = torch.sigmoid(self.k * out)
         return out
@@ -577,21 +593,17 @@ def run_train_model(cfg: DictConfig) -> None:
     # the metadata DataFrame so we only load embeddings needed for training.
     whisper_emb_dir = Path(cfg.data.cadenza_data_root) / cfg.data.dataset / "embeddings"
 
-    # load mfcc data only if the full multimodal model uses it. For the simple
-    # model we avoid loading MFCCs to reduce startup I/O.
-    if model_type != "simple":
-        mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
-        x2d_dfs = []
-        for file in os.listdir(mfcc_dir):
-            if file.endswith(".json"):
-                print(f"Processing file: {file}")
-                mfcc_path = os.path.join(mfcc_dir, file)
-                mfcc_df = pd.read_json(mfcc_path)
-                x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
-        x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
-        assert len(x2d_df.columns) == 8802, f"Expected 8802 signals in MFCC data but got {len(x2d_df.columns)}"
-    else:
-        x2d_df = pd.DataFrame()
+    # load MFCC data
+    mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
+    x2d_dfs = []
+    for file in os.listdir(mfcc_dir):
+        if file.endswith(".json"):
+            print(f"Processing file: {file}")
+            mfcc_path = os.path.join(mfcc_dir, file)
+            mfcc_df = pd.read_json(mfcc_path)
+            x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
+    x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
+    assert len(x2d_df.columns) == 8802, f"Expected 8802 signals in MFCC data but got {len(x2d_df.columns)}"
 
     # prepare scalar inputs
     # gather STOI score, whisper score, and VAR dB as input features from jsonl files
@@ -609,14 +621,10 @@ def run_train_model(cfg: DictConfig) -> None:
     merged_df = merged_df.merge(features_df[["signal", "features"]], on="signal")
     # If using multimodal model, remove signals that don't have mfcc data and
     # perform the usual sanity checks. For the simple model, skip filtering.
-    if model_type != "simple":
-        merged_df = merged_df[merged_df["signal"].isin(x2d_df.columns)]
-        assert len(merged_df) == x2d_df.shape[1], "Mismatch in number of samples between scalar and 2d features"
-        # Sanity check: expected train set size
-        assert len(merged_df) == 8802, f"Expected 8802 training samples but got {len(merged_df)}"
-    else:
-        # keep merged_df as-is when MFCCs are not loaded
-        pass
+    merged_df = merged_df[merged_df["signal"].isin(x2d_df.columns)]
+    assert len(merged_df) == x2d_df.shape[1], "Mismatch in number of samples between scalar and 2d features"
+    # Sanity check: expected train set size
+    assert len(merged_df) == 8802, f"Expected 8802 training samples but got {len(merged_df)}"
     print("scalar features:\n",merged_df.head())
 
     # Create streaming datasets: one with augmentation enabled for training
@@ -651,7 +659,7 @@ def run_train_model(cfg: DictConfig) -> None:
 
     # define parameters for training
     model.train()
-    lr = 1e-5
+    lr = 2e-5
     wd = 2e-3
     # LayerNorm and biases should not have weight decay
     decay = []
@@ -701,7 +709,7 @@ def run_train_model(cfg: DictConfig) -> None:
                 logger.warning(f"Failed to load resume checkpoint {resume_path}: {e}")
         else:
             logger.warning(f"Configured resume_checkpoint {resume_path} does not exist; starting from scratch")
-    num_epochs = 70
+    num_epochs = 50
     criterion = nn.SmoothL1Loss(beta=beta)
     patience = 10
     best_val_loss = float("inf")
@@ -813,8 +821,10 @@ def run_train_model(cfg: DictConfig) -> None:
                 outputs = model(
                     batch_x1d_left,
                     batch_x1d_right,
+                    batch_x2d,
                     batch_scalar,
                     mask1d=batch_mask1d,
+                    mask2d=batch_mask2d,
                 )
             else:
                 outputs = model(
@@ -860,8 +870,10 @@ def run_train_model(cfg: DictConfig) -> None:
                     val_outputs = model(
                         val_x1d_left,
                         val_x1d_right,
+                        val_x2d,
                         val_scalar,
                         mask1d=val_mask1d,
+                        mask2d=val_mask2d,
                     )
                 else:
                     val_outputs = model(
@@ -1114,8 +1126,10 @@ def run_inference(cfg: DictConfig) -> None:
                     out = model(
                         x1d_left,
                         x1d_right,
+                        x2d_batch,
                         scalar_batch,
                         mask1d=mask1d,
+                        mask2d=mask2d,
                     )
                 else:
                     out = model(
