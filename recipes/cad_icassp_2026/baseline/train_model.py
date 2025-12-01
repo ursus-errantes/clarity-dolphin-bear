@@ -1196,13 +1196,13 @@ def run_inference(cfg: DictConfig) -> None:
 
     # Find all checkpoint files produced during training and run inference for each.
     # Checkpoints follow the pattern: {dataset}.train.{ModelClass}*.pth
-    ckpt_pattern = f"{cfg.data.dataset}.train.{model.__class__.__name__}*.pth"
+    ckpt_pattern = f"cadenza_data.train.{model.__class__.__name__}*.pth"
     ckpt_dir = Path(".")
     ckpt_paths = sorted(ckpt_dir.glob(ckpt_pattern))
 
     # If no checkpoints found, fall back to the final model path if present
     if not ckpt_paths:
-        final_path = Path(f"{cfg.data.dataset}.train.{model.__class__.__name__}.pth")
+        final_path = Path(f"cadenza_data.train.{model.__class__.__name__}.pth")
         if final_path.exists():
             ckpt_paths = [final_path]
         else:
@@ -1220,10 +1220,15 @@ def run_inference(cfg: DictConfig) -> None:
         mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
         spectral_centroid_dir = "/mnt/d/cadenza_extracted_features/spectral-centroid-train/centroid/"
         spectral_rolloff_dir = "/mnt/d/cadenza_extracted_features/spectral-rolloff-train/spectral-rolloff/"
-    else:
+    elif split == "valid":
         mfcc_dir = "/mnt/d/cadenza_extracted_features/mfccs_cmvn_valid/mfcc/"
-        spectral_centroid_dir = "/mnt/d/cadenza_extracted_features/spectral-centroid-valid/centroid/"
-        spectral_rolloff_dir = "/mnt/d/cadenza_extracted_features/spectral-rolloff-valid/spectral-rolloff/"
+        spectral_centroid_dir = "/mnt/d/cadenza_extracted_features/spectral-centroid-valid/spectral-centroid-valid/centroid/"
+        spectral_rolloff_dir = "/mnt/d/cadenza_extracted_features/spectral-rolloff-valid/spectral-rolloff-valid/spectral-rolloff/"
+    else:
+        mfcc_dir = "/mnt/d/cadenza_extracted_features/mfcc-eval/mfcc-cmvn-eval/mfcc/"
+        spectral_centroid_dir = "/mnt/d/cadenza_extracted_features/spectral-centroid-eval/spectral-centroid-eval/centroid/"
+        spectral_rolloff_dir = "/mnt/d/cadenza_extracted_features/spectral-rolloff-eval/spectral-rolloff-eval/spectral-rolloff/"
+    
 
     # load MFCCs (each file is a json with a single-column of signals)
     x2d_dfs = []
@@ -1289,7 +1294,13 @@ def run_inference(cfg: DictConfig) -> None:
     # keep only signals that have MFCCs available
     merged_df = merged_df[merged_df["signal"].isin(x2d_df.columns)]
     # Quick sanity check for expected sizes
-    expected = 8802 if split == "train" else 1175
+    expected = 0
+    if split == "train":
+        expected = 8802
+    elif split == "valid":
+        expected = 1175
+    else:
+        expected = 1095
     if len(merged_df) != x2d_df.shape[1]:
         logger.warning(
             f"Mismatch in number of samples between scalar and 2d features: merged_df={len(merged_df)} x2d_cols={x2d_df.shape[1]}"
@@ -1301,9 +1312,9 @@ def run_inference(cfg: DictConfig) -> None:
 
     # Create streaming dataset and dataloader used for inference
     dataset = EmbeddingDataset(merged_df, whisper_emb_dir, x2d_df, system=cfg.baseline.system)
-    inf_batch_size = getattr(cfg, "inference_batch_size", 32)
+    inf_batch_size = getattr(cfg, "inference_batch_size", 16)
     # inference dataloader: use the same worker/pin settings
-    inf_num_workers = min(8, max(1, (os.cpu_count() or 4) - 2))
+    inf_num_workers = 3
     inf_pin_memory = True if device.type == "cuda" else False
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -1341,15 +1352,14 @@ def run_inference(cfg: DictConfig) -> None:
 
         outputs = []
         with torch.no_grad():
-            for x1d_left, x1d_right, x2d_batch, spec_left_batch, spec_right_batch, scalar_batch, y_dummy, mask1d_left, mask1d_right, mask2d in dataloader:
+            for x1d_left, x1d_right, x2d_batch, spec_left_batch, spec_right_batch, scalar_batch, y_dummy, mask1d, mask2d in dataloader:
                 x1d_left = x1d_left.to(device)
                 x1d_right = x1d_right.to(device)
                 x2d_batch = x2d_batch.to(device)
                 spec_left_batch = spec_left_batch.to(device)
                 spec_right_batch = spec_right_batch.to(device)
                 scalar_batch = scalar_batch.to(device)
-                mask1d_left = mask1d_left.to(device)
-                mask1d_right = mask1d_right.to(device)
+                mask1d = mask1d.to(device)
                 mask2d = mask2d.to(device)
 
                 out = model(
@@ -1359,8 +1369,7 @@ def run_inference(cfg: DictConfig) -> None:
                     spec_left_batch,
                     spec_right_batch,
                     scalar_batch,
-                    mask1d_left=mask1d_left,
-                    mask1d_right=mask1d_right,
+                    mask1d=mask1d,
                     mask2d=mask2d,
                 )
 
@@ -1383,5 +1392,5 @@ def run_inference(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    run_train_model()
-    # run_inference()
+    # run_train_model()
+    run_inference()
