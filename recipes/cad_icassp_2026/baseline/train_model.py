@@ -119,11 +119,12 @@ class multimodal_conv_mlp(nn.Module):
         self.k = k
 
 
-    def forward(self, x1d_left, x1d_right, x2d, x_scalar, mask1d=None, mask2d=None):
+    def forward(self, x1d_left, x1d_right, x2d, spec_left, spec_right, x_scalar, mask1d=None, mask2d=None):
         """
         x1d_left: tensor of shape (batch_size, c1_in, time_steps)
         x1d_right: tensor of shape (batch_size, c1_in, time_steps)
         x2d: tensor of shape (batch_size, c2_in, freq_bins, time_steps)
+        spec_left/spec_right: optional spectral features (batch, 2, time)
         x_scalar: tensor of shape (batch_size, scalar_dim)
         mask: tensor of shape (batch_size, time_steps) indicating valid elements (needed for batching variable-length inputs)
         """
@@ -197,7 +198,7 @@ class simple_meanpool_scalar_mlp(nn.Module):
     masked mean pooling for 1D embeddings, projects pooled vectors and concatenates
     everything before an MLP.
     """
-    def __init__(self, c1_in, scalar_dim, proj_dim=32, c2_in=2, proj_dim2=32, k=1.0, p_dropout=0.1):
+    def __init__(self, c1_in, scalar_dim, proj_dim=32, c2_in=2, proj_dim2=32, k=1.0, p_dropout=0.1, post_dropout: float = 0.05):
         super().__init__()
 
         # linear projection after mean pooling to reduce dimensionality
@@ -205,13 +206,18 @@ class simple_meanpool_scalar_mlp(nn.Module):
         self.proj_right = nn.Linear(c1_in, proj_dim)
         # projection for 2D MFCC pooled features
         self.proj_2d = nn.Linear(c2_in, proj_dim2)
+        # small spectral feature branches: process centroid+rolloff per-channel -> channels=4 each
+        self.spec_conv_left = nn.Conv1d(2, 4, kernel_size=3, padding=1)
+        self.spec_gn_left = nn.GroupNorm(1, 4)
+        self.spec_conv_right = nn.Conv1d(2, 4, kernel_size=3, padding=1)
+        self.spec_gn_right = nn.GroupNorm(1, 4)
 
         # MLP for scalar features
         self.mlp_scalar = nn.Sequential(nn.Linear(scalar_dim, 32), nn.ReLU())
 
         # final classifier
         self.final_mlp = nn.Sequential(
-            nn.Linear(proj_dim * 2 + proj_dim2 + 32, 64),
+            nn.Linear(proj_dim * 2 + proj_dim2 + 32 + 8, 64),
             nn.ReLU(),
             nn.Dropout(p_dropout),
             nn.Linear(64, 32),
@@ -220,6 +226,12 @@ class simple_meanpool_scalar_mlp(nn.Module):
             nn.Linear(32, 1),
         )
         self.k = k
+        # post-branch dropout applied after each branch and before concatenation
+        self.postdrop_left = nn.Dropout(post_dropout)
+        self.postdrop_right = nn.Dropout(post_dropout)
+        self.postdrop_2d = nn.Dropout(post_dropout)
+        self.postdrop_scalar = nn.Dropout(post_dropout)
+        self.postdrop_spec = nn.Dropout(post_dropout)
 
     @staticmethod
     def _masked_mean_pool(x: torch.Tensor, mask: torch.Tensor | None):
@@ -237,26 +249,48 @@ class simple_meanpool_scalar_mlp(nn.Module):
         lengths = mask_f.sum(dim=-1).clamp(min=1.0)
         return summed / lengths
 
-    def forward(self, x1d_left, x1d_right, x2d, x_scalar, mask1d=None, mask2d=None):
+    def forward(self, x1d_left, x1d_right, x2d, spec_left, spec_right, x_scalar, mask1d=None, mask2d=None):
         """
         x1d_left/right: (batch, c1_in, time)
         x2d: (batch, c2_in, freq, time)
+        spec: (batch, 2, time)  # spectral centroid and rolloff per time
         x_scalar: (batch, scalar_dim)
         mask1d: (batch, time)
         mask2d: (batch, time)
         """
-        # pooled embeddings (batch, c1_in)
+        # pooled embeddings via masked mean pooling over time (batch, c1_in)
         pooled_left = self._masked_mean_pool(x1d_left, mask1d)
         pooled_right = self._masked_mean_pool(x1d_right, mask1d)
 
         # project to smaller dimension
         left_feat = torch.relu(self.proj_left(pooled_left))
+        # apply small dropout after left/right projections
+        left_feat = self.postdrop_left(left_feat)
         right_feat = torch.relu(self.proj_right(pooled_right))
+        right_feat = self.postdrop_right(right_feat)
 
         # scalar embedding
         scalar_feat = self.mlp_scalar(x_scalar)
+        scalar_feat = self.postdrop_scalar(scalar_feat)
 
-        # Process 2D MFCCs: average over frequency, then masked mean-pool over time
+        # Process spectral features per-channel (centroid + rolloff): spec_left/right shape (batch, 2, t)
+        if spec_left is None or spec_right is None:
+            spec_feat = torch.zeros((x1d_left.size(0), 16), device=x1d_left.device)
+        else:
+            # left branch
+            spec_l = self.spec_conv_left(spec_left)
+            spec_l = self.spec_gn_left(spec_l)
+            spec_l = torch.relu(spec_l)
+            spec_feat_l = self._masked_mean_pool(spec_l, mask2d)
+            # right branch
+            spec_r = self.spec_conv_right(spec_right)
+            spec_r = self.spec_gn_right(spec_r)
+            spec_r = torch.relu(spec_r)
+            spec_feat_r = self._masked_mean_pool(spec_r, mask2d)
+            spec_feat = torch.cat([spec_feat_l, spec_feat_r], dim=-1)
+            spec_feat = self.postdrop_spec(spec_feat)
+
+        # Process 2D MFCCs: average over frequency, then temporal attention over time
         if x2d is None:
             # fallback zero vector if no x2d provided
             pooled_2d = torch.zeros((x1d_left.size(0), self.proj_2d.in_features), device=x1d_left.device)
@@ -264,10 +298,10 @@ class simple_meanpool_scalar_mlp(nn.Module):
             # x2d: (batch, c2, freq, time) -> mean over freq -> (batch, c2, time)
             x2d_freq = x2d.mean(dim=2)
             pooled_2d = self._masked_mean_pool(x2d_freq, mask2d)  # (batch, c2)
-        # project 2d pooled features
+        # project 2d pooled features and apply small dropout
         proj_2d = torch.relu(self.proj_2d(pooled_2d))
-
-        combined = torch.cat([left_feat, right_feat, proj_2d, scalar_feat], dim=-1)
+        proj_2d = self.postdrop_2d(proj_2d)
+        combined = torch.cat([left_feat, right_feat, proj_2d, scalar_feat, spec_feat], dim=-1)
         out = self.final_mlp(combined)
         out = torch.sigmoid(self.k * out)
         return out
@@ -429,15 +463,72 @@ class EmbeddingDataset(torch.utils.data.Dataset):
         right_t = torch.from_numpy(right_arr)
 
         # MFCCs are stored in x2d_df as two arrays per column
-        # MFCCs: if x2d_df not provided (e.g. simple model), return a minimal placeholder
+        # MFCCs and optional spectral features (centroid, rolloff) are stored
+        # in `x2d_df` per column. We try to extract MFCC arrays (2D) and any
+        # 1D spectral arrays (treated as centroid/rolloff) if present.
+        # prepare x2d and spectral centroid/rolloff per-channel
+        spec_left = None
+        spec_right = None
         if getattr(self, "x2d_df", None) is None or self.x2d_df.empty:
             x2d = torch.zeros((2, 1, 1), dtype=torch.float32)
+            spec_left = torch.zeros((2, 1), dtype=torch.float32)
+            spec_right = torch.zeros((2, 1), dtype=torch.float32)
         else:
             mfcc_col = self.x2d_df[sig]
-            # mfcc_col is iterable of two arrays (per channel)
-            arrays = [torch.tensor(a, dtype=torch.float32) for a in mfcc_col]
-            # stack to (2, freq_bins, time)
-            x2d = torch.stack(arrays, dim=0)
+            arrays = []
+            spec_2ch_list = []
+            for item in mfcc_col:
+                a = np.asarray(item)
+                # Spectral features (centroid/rolloff) may be stored as (2, t) or (1, t).
+                # MFCCs are (freq, time) (e.g. 13 x T). Classify by first-dim size.
+                if a.ndim == 2 and a.shape[0] in (1, 2):
+                    # (1, t) -> duplicate to stereo; (2, t) -> already stereo
+                    if a.shape[0] == 1:
+                        arr2 = np.vstack([a, a])
+                        spec_2ch_list.append(arr2)
+                    else:
+                        spec_2ch_list.append(a)
+                elif a.ndim == 2:
+                    # treat as MFCC-like (freq, time)
+                    arrays.append(torch.tensor(a, dtype=torch.float32))
+                elif a.ndim == 1:
+                    # fallback: 1D arrays (t,) - assume mono spectral; duplicate to both channels
+                    arr2 = np.stack([a, a], axis=0)
+                    spec_2ch_list.append(arr2)
+
+            if arrays:
+                x2d = torch.stack(arrays, dim=0)
+            else:
+                x2d = torch.zeros((2, 1, 1), dtype=torch.float32)
+
+            # Build per-channel spec_left/spec_right where each is (2, t): [centroid, rolloff]
+            if len(spec_2ch_list) >= 2:
+                f0 = spec_2ch_list[0]
+                f1 = spec_2ch_list[1]
+                L = max(f0.shape[1], f1.shape[1])
+                def pad_2ch(a, L):
+                    if a.shape[1] == L:
+                        return a
+                    out = np.zeros((2, L), dtype=a.dtype)
+                    out[:, : a.shape[1]] = a
+                    return out
+
+                f0 = pad_2ch(f0, L)
+                f1 = pad_2ch(f1, L)
+                # spec_left: stack centroid_left, rolloff_left -> shape (2, L)
+                spec_left = torch.tensor(np.stack([f0[0, :], f1[0, :]], axis=0), dtype=torch.float32)
+                # spec_right: stack centroid_right, rolloff_right -> shape (2, L)
+                spec_right = torch.tensor(np.stack([f0[1, :], f1[1, :]], axis=0), dtype=torch.float32)
+            elif len(spec_2ch_list) == 1:
+                f0 = spec_2ch_list[0]
+                L = f0.shape[1]
+                # duplicate second feature as zeros
+                f1 = np.zeros((2, L), dtype=f0.dtype)
+                spec_left = torch.tensor(np.stack([f0[0, :], f1[0, :]], axis=0), dtype=torch.float32)
+                spec_right = torch.tensor(np.stack([f0[1, :], f1[1, :]], axis=0), dtype=torch.float32)
+            else:
+                spec_left = torch.zeros((2, 1), dtype=torch.float32)
+                spec_right = torch.zeros((2, 1), dtype=torch.float32)
 
         scalar = torch.from_numpy(self.scalar_arr[idx]).float()
         label = torch.tensor(self.labels[idx], dtype=torch.float32).unsqueeze(0)
@@ -454,17 +545,19 @@ class EmbeddingDataset(torch.utils.data.Dataset):
                 if self._emb_std is not None:
                     emb_noise_std = 0.01 * float(self._emb_std[idx])
 
-            left_t, right_t, x2d, scalar = self._augment(
-                left_t, right_t, x2d, scalar, noise_std=noise_std, emb_noise_std=emb_noise_std
+            left_t, right_t, x2d, spec_left, spec_right, scalar = self._augment(
+                left_t, right_t, x2d, spec_left, spec_right, scalar, noise_std=noise_std, emb_noise_std=emb_noise_std
             )
 
-        return left_t, right_t, x2d, scalar, label
+        return left_t, right_t, x2d, spec_left, spec_right, scalar, label
 
     def _augment(
         self,
         left_t: torch.Tensor,
         right_t: torch.Tensor,
         x2d: torch.Tensor,
+        spec_left: torch.Tensor,
+        spec_right: torch.Tensor,
         scalar: torch.Tensor,
         noise_std: float | None = None,
         emb_noise_std: float | None = None,
@@ -486,6 +579,8 @@ class EmbeddingDataset(torch.utils.data.Dataset):
             left_t, right_t = right_t, left_t
             # swap MFCC channels along channel dim 0
             x2d = x2d[[1, 0], ...]
+            # swap spectral left/right arrays as well
+            spec_left, spec_right = spec_right, spec_left
 
         # Add Gaussian noise to MFCCs (in-place creation)
         # noise_std and emb_noise_std are provided by caller where possible
@@ -495,6 +590,16 @@ class EmbeddingDataset(torch.utils.data.Dataset):
         if noise_std is not None and noise_std > 0.0:
             noise = torch.randn_like(x2d) * float(noise_std)
             x2d = x2d + noise
+            # add small noise to spectral features (match temporal dim)
+            try:
+                if spec_left is not None:
+                    spec_noise_l = torch.randn_like(spec_left) * float(noise_std)
+                    spec_left = spec_left + spec_noise_l
+                if spec_right is not None:
+                    spec_noise_r = torch.randn_like(spec_right) * float(noise_std)
+                    spec_right = spec_right + spec_noise_r
+            except Exception:
+                pass
 
         # Add Gaussian noise to whisper embeddings
         if emb_noise_std is None:
@@ -508,7 +613,7 @@ class EmbeddingDataset(torch.utils.data.Dataset):
         if self.scalar_jitter is not None and float(self.scalar_jitter) > 0.0:
             scalar = scalar * (1.0 + torch.randn_like(scalar) * float(self.scalar_jitter))
 
-        return left_t, right_t, x2d, scalar
+        return left_t, right_t, x2d, spec_left, spec_right, scalar
 
 
 def collate_batch(samples):
@@ -525,8 +630,10 @@ def collate_batch(samples):
     lefts = [s[0] for s in samples]
     rights = [s[1] for s in samples]
     x2ds = [s[2] for s in samples]
-    scalars = torch.stack([s[3] for s in samples], dim=0)
-    labels = torch.stack([s[4] for s in samples], dim=0)
+    specs_left = [s[3] for s in samples]
+    specs_right = [s[4] for s in samples]
+    scalars = torch.stack([s[5] for s in samples], dim=0)
+    labels = torch.stack([s[6] for s in samples], dim=0)
 
     # pad left/right (list of (t, d)) -> pad_sequence -> (batch, max_t, d)
     # also compute boolean masks indicating valid (non-padded) time steps
@@ -553,7 +660,19 @@ def collate_batch(samples):
     lengths_x2d_tensor = torch.tensor(lengths_x2d, dtype=torch.long)
     mask2d = (torch.arange(max_t2).unsqueeze(0) < lengths_x2d_tensor.unsqueeze(1))
 
-    return padded_left, padded_right, padded_x2d, scalars, labels, mask1d, mask2d
+    # pad spectral features (each spec_left/spec_right is (2, t)) -> permute to (t, 2) for pad_sequence
+    seqs_spec_left = [s.permute(1, 0) for s in specs_left]
+    seqs_spec_right = [s.permute(1, 0) for s in specs_right]
+    lengths_spec = [s.shape[0] for s in seqs_spec_left]
+    padded_spec_left = pad_sequence(seqs_spec_left, batch_first=True)  # (batch, max_t_spec, 2)
+    padded_spec_left = padded_spec_left.permute(0, 2, 1)  # (batch, 2, max_t_spec)
+    padded_spec_right = pad_sequence(seqs_spec_right, batch_first=True)  # (batch, max_t_spec, 2)
+    padded_spec_right = padded_spec_right.permute(0, 2, 1)  # (batch, 2, max_t_spec)
+    max_t_spec = padded_spec_left.shape[-1]
+    lengths_spec_tensor = torch.tensor(lengths_spec, dtype=torch.long)
+    mask_spec = (torch.arange(max_t_spec).unsqueeze(0) < lengths_spec_tensor.unsqueeze(1))
+
+    return padded_left, padded_right, padded_x2d, padded_spec_left, padded_spec_right, scalars, labels, mask1d, mask2d
 
 
 @hydra.main(config_path="configs", config_name="config", version_base=None)
@@ -566,7 +685,7 @@ def run_train_model(cfg: DictConfig) -> None:
     logger.info(f"Using device: {device}")
 
     # Define model
-    batch_size = 8
+    batch_size = 16
     num_scalar_features = 3
     num_1d_channels = 512  # whisper encoder embedding size
     num_2d_channels = 2  # MFCCs in stereo
@@ -578,14 +697,16 @@ def run_train_model(cfg: DictConfig) -> None:
     model_type = getattr(cfg.baseline, "model_type", "simple")
     if model_type == "simple":
         proj_dim = getattr(cfg.baseline, "proj_dim", 64)
-        model = simple_meanpool_scalar_mlp(num_1d_channels, num_scalar_features, proj_dim=proj_dim, k=k, p_dropout=p_dropout)
+        model = simple_meanpool_scalar_mlp(
+            num_1d_channels, num_scalar_features, proj_dim=proj_dim, k=k, p_dropout=p_dropout, post_dropout=post_dropout
+        )
     else:
         model = multimodal_conv_mlp(
             num_1d_channels, num_2d_channels, num_scalar_features, k=k, p_dropout=p_dropout, post_dropout=post_dropout
         )
     model = model.to(device) # move model to GPU if available
     # DataLoader parallel settings
-    num_workers = min(8, max(1, (os.cpu_count() or 4) - 2))
+    num_workers = 2
     pin_memory = True if device.type == "cuda" else False
 
     # Note: loading all whisper per-frame embeddings at once can use a lot of memory
@@ -595,6 +716,8 @@ def run_train_model(cfg: DictConfig) -> None:
 
     # load MFCC data
     mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
+    spectral_centroid_dir = "/mnt/d/cadenza_extracted_features/spectral-centroid-train/centroid/"
+    spectral_rolloff_dir = "/mnt/d/cadenza_extracted_features/spectral-rolloff-train/spectral-rolloff/"
     x2d_dfs = []
     for file in os.listdir(mfcc_dir):
         if file.endswith(".json"):
@@ -603,6 +726,49 @@ def run_train_model(cfg: DictConfig) -> None:
             mfcc_df = pd.read_json(mfcc_path)
             x2d_dfs.append(mfcc_df) # single column with signal name, then two rows of mfcc data
     x2d_df = pd.concat(x2d_dfs, axis=1) # -> [2 rows (channels) x num signals]
+    # Optionally load spectral centroid and rolloff files and append them as additional rows
+    if os.path.isdir(spectral_centroid_dir):
+        centroid_dfs = []
+        for file in os.listdir(spectral_centroid_dir):
+            if file.endswith('.json'):
+                centroid_path = os.path.join(spectral_centroid_dir, file)
+                try:
+                    cdf = pd.read_json(centroid_path)
+                    centroid_dfs.append(cdf)
+                except Exception:
+                    logger.warning(f"Failed to read centroid file {centroid_path}")
+        if centroid_dfs:
+            centroid_df = pd.concat(centroid_dfs, axis=1)
+            # ensure columns align with MFCC columns; reindex to avoid misalignment
+            centroid_df = centroid_df.reindex(columns=x2d_df.columns)
+            missing = list(set(x2d_df.columns) - set(centroid_df.columns))
+            if missing:
+                logger.warning(
+                    "Spectral centroid data missing for %d signals; these will be filled with NaN: %s",
+                    len(missing), str(missing[:5]),
+                )
+            x2d_df = pd.concat([x2d_df, centroid_df], axis=0)
+    if os.path.isdir(spectral_rolloff_dir):
+        rolloff_dfs = []
+        for file in os.listdir(spectral_rolloff_dir):
+            if file.endswith('.json'):
+                rolloff_path = os.path.join(spectral_rolloff_dir, file)
+                try:
+                    rdf = pd.read_json(rolloff_path)
+                    rolloff_dfs.append(rdf)
+                except Exception:
+                    logger.warning(f"Failed to read rolloff file {rolloff_path}")
+        if rolloff_dfs:
+            rolloff_df = pd.concat(rolloff_dfs, axis=1)
+            # reindex to MFCC columns to guarantee alignment
+            rolloff_df = rolloff_df.reindex(columns=x2d_df.columns)
+            missing = list(set(x2d_df.columns) - set(rolloff_df.columns))
+            if missing:
+                logger.warning(
+                    "Spectral rolloff data missing for %d signals; these will be filled with NaN: %s",
+                    len(missing), str(missing[:5]),
+                )
+            x2d_df = pd.concat([x2d_df, rolloff_df], axis=0)
     assert len(x2d_df.columns) == 8802, f"Expected 8802 signals in MFCC data but got {len(x2d_df.columns)}"
 
     # prepare scalar inputs
@@ -631,13 +797,13 @@ def run_train_model(cfg: DictConfig) -> None:
     # and one without augmentation for validation. We will split indices so
     # augmentation only affects the training subset.
     # Default augmentation hyperparameters
-    aug_swap_prob = 0.5
+    aug_swap_prob = 0.25
     # If None, noise std is computed per-sample inside the dataset as 0.01 * mfcc_std
     aug_noise_std = None
     # label jitter applied to training targets (fractional/additive). Default 1%.
-    label_jitter = 0.01
+    label_jitter = 0.005
     emb_noise_std = None
-    scalar_jitter = 0.01
+    scalar_jitter = 0.005
     dataset_aug = EmbeddingDataset(
         merged_df,
         whisper_emb_dir,
@@ -659,8 +825,8 @@ def run_train_model(cfg: DictConfig) -> None:
 
     # define parameters for training
     model.train()
-    lr = 2e-5
-    wd = 2e-3
+    lr = 5e-5
+    wd = 1e-5
     # LayerNorm and biases should not have weight decay
     decay = []
     no_decay = []
@@ -802,11 +968,13 @@ def run_train_model(cfg: DictConfig) -> None:
         model.train()
         train_loss = 0.0
         train_mse_total = 0.0
-        for batch_x1d_left, batch_x1d_right, batch_x2d, batch_scalar, batch_y, batch_mask1d, batch_mask2d in train_loader:
+        for batch_x1d_left, batch_x1d_right, batch_x2d, batch_spec_left, batch_spec_right, batch_scalar, batch_y, batch_mask1d, batch_mask2d in train_loader:
             # move data to GPU if available
             batch_x1d_left = batch_x1d_left.to(device)
             batch_x1d_right = batch_x1d_right.to(device)
             batch_x2d = batch_x2d.to(device)
+            batch_spec_left = batch_spec_left.to(device)
+            batch_spec_right = batch_spec_right.to(device)
             batch_scalar = batch_scalar.to(device)
             batch_y = batch_y.to(device)
             # apply label jitter (only during training) to smooth targets
@@ -822,6 +990,8 @@ def run_train_model(cfg: DictConfig) -> None:
                     batch_x1d_left,
                     batch_x1d_right,
                     batch_x2d,
+                    batch_spec_left,
+                    batch_spec_right,
                     batch_scalar,
                     mask1d=batch_mask1d,
                     mask2d=batch_mask2d,
@@ -831,6 +1001,8 @@ def run_train_model(cfg: DictConfig) -> None:
                     batch_x1d_left,
                     batch_x1d_right,
                     batch_x2d,
+                    batch_spec_left,
+                    batch_spec_right,
                     batch_scalar,
                     mask1d=batch_mask1d,
                     mask2d=batch_mask2d,
@@ -856,11 +1028,13 @@ def run_train_model(cfg: DictConfig) -> None:
         val_preds = []
         val_trues = []
         with torch.no_grad():
-            for val_x1d_left, val_x1d_right, val_x2d, val_scalar, val_y, val_mask1d, val_mask2d in val_loader:
+            for val_x1d_left, val_x1d_right, val_x2d, val_spec_left, val_spec_right, val_scalar, val_y, val_mask1d, val_mask2d in val_loader:
                 # move data to GPU if available
                 val_x1d_left = val_x1d_left.to(device)
                 val_x1d_right = val_x1d_right.to(device)
                 val_x2d = val_x2d.to(device)
+                val_spec_left = val_spec_left.to(device)
+                val_spec_right = val_spec_right.to(device)
                 val_scalar = val_scalar.to(device)
                 val_y = val_y.to(device)
                 val_mask1d = val_mask1d.to(device)
@@ -871,6 +1045,8 @@ def run_train_model(cfg: DictConfig) -> None:
                         val_x1d_left,
                         val_x1d_right,
                         val_x2d,
+                        val_spec_left,
+                        val_spec_right,
                         val_scalar,
                         mask1d=val_mask1d,
                         mask2d=val_mask2d,
@@ -880,6 +1056,8 @@ def run_train_model(cfg: DictConfig) -> None:
                         val_x1d_left,
                         val_x1d_right,
                         val_x2d,
+                        val_spec_left,
+                        val_spec_right,
                         val_scalar,
                         mask1d=val_mask1d,
                         mask2d=val_mask2d,
@@ -1008,7 +1186,11 @@ def run_inference(cfg: DictConfig) -> None:
     model_type = getattr(cfg.baseline, "model_type", "simple")
     if model_type == "simple":
         proj_dim = getattr(cfg.baseline, "proj_dim", 64)
-        model = simple_meanpool_scalar_mlp(num_1d_channels, num_scalar_features, proj_dim=proj_dim, k=k, p_dropout=p_dropout)
+        # keep inference dropout the same small post-dropout used during training
+        post_dropout = 0.05
+        model = simple_meanpool_scalar_mlp(
+            num_1d_channels, num_scalar_features, proj_dim=proj_dim, k=k, p_dropout=p_dropout, post_dropout=post_dropout
+        )
     else:
         model = multimodal_conv_mlp(num_1d_channels, num_2d_channels, num_scalar_features, k=k, p_dropout=p_dropout)
 
@@ -1036,8 +1218,12 @@ def run_inference(cfg: DictConfig) -> None:
     # mfcc directories differ between train/valid on the host; mirror train logic
     if split == "train":
         mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
+        spectral_centroid_dir = "/mnt/d/cadenza_extracted_features/spectral-centroid-train/centroid/"
+        spectral_rolloff_dir = "/mnt/d/cadenza_extracted_features/spectral-rolloff-train/spectral-rolloff/"
     else:
         mfcc_dir = "/mnt/d/cadenza_extracted_features/mfccs_cmvn_valid/mfcc/"
+        spectral_centroid_dir = "/mnt/d/cadenza_extracted_features/spectral-centroid-valid/centroid/"
+        spectral_rolloff_dir = "/mnt/d/cadenza_extracted_features/spectral-rolloff-valid/spectral-rolloff/"
 
     # load MFCCs (each file is a json with a single-column of signals)
     x2d_dfs = []
@@ -1047,6 +1233,47 @@ def run_inference(cfg: DictConfig) -> None:
             mfcc_df = pd.read_json(mfcc_path)
             x2d_dfs.append(mfcc_df)
     x2d_df = pd.concat(x2d_dfs, axis=1)
+    # Append spectral centroid/rolloff for inference if available
+    if os.path.isdir(spectral_centroid_dir):
+        centroid_dfs = []
+        for file in os.listdir(spectral_centroid_dir):
+            if file.endswith('.json'):
+                centroid_path = os.path.join(spectral_centroid_dir, file)
+                try:
+                    cdf = pd.read_json(centroid_path)
+                    centroid_dfs.append(cdf)
+                except Exception:
+                    logger.warning(f"Failed to read centroid file {centroid_path}")
+        if centroid_dfs:
+            centroid_df = pd.concat(centroid_dfs, axis=1)
+            centroid_df = centroid_df.reindex(columns=x2d_df.columns)
+            missing = list(set(x2d_df.columns) - set(centroid_df.columns))
+            if missing:
+                logger.warning(
+                    "Spectral centroid data missing for %d signals; these will be filled with NaN: %s",
+                    len(missing), str(missing[:5]),
+                )
+            x2d_df = pd.concat([x2d_df, centroid_df], axis=0)
+    if os.path.isdir(spectral_rolloff_dir):
+        rolloff_dfs = []
+        for file in os.listdir(spectral_rolloff_dir):
+            if file.endswith('.json'):
+                rolloff_path = os.path.join(spectral_rolloff_dir, file)
+                try:
+                    rdf = pd.read_json(rolloff_path)
+                    rolloff_dfs.append(rdf)
+                except Exception:
+                    logger.warning(f"Failed to read rolloff file {rolloff_path}")
+        if rolloff_dfs:
+            rolloff_df = pd.concat(rolloff_dfs, axis=1)
+            rolloff_df = rolloff_df.reindex(columns=x2d_df.columns)
+            missing = list(set(x2d_df.columns) - set(rolloff_df.columns))
+            if missing:
+                logger.warning(
+                    "Spectral rolloff data missing for %d signals; these will be filled with NaN: %s",
+                    len(missing), str(missing[:5]),
+                )
+            x2d_df = pd.concat([x2d_df, rolloff_df], axis=0)
 
     # load scalar features (STOI, whisper score, VAR dB)
     stoi_df = load_features(cfg, split, "stoi", None)
@@ -1114,32 +1341,29 @@ def run_inference(cfg: DictConfig) -> None:
 
         outputs = []
         with torch.no_grad():
-            for x1d_left, x1d_right, x2d_batch, scalar_batch, y_dummy, mask1d, mask2d in dataloader:
+            for x1d_left, x1d_right, x2d_batch, spec_left_batch, spec_right_batch, scalar_batch, y_dummy, mask1d_left, mask1d_right, mask2d in dataloader:
                 x1d_left = x1d_left.to(device)
                 x1d_right = x1d_right.to(device)
                 x2d_batch = x2d_batch.to(device)
+                spec_left_batch = spec_left_batch.to(device)
+                spec_right_batch = spec_right_batch.to(device)
                 scalar_batch = scalar_batch.to(device)
-                mask1d = mask1d.to(device)
+                mask1d_left = mask1d_left.to(device)
+                mask1d_right = mask1d_right.to(device)
                 mask2d = mask2d.to(device)
 
-                if model_type == "simple":
-                    out = model(
-                        x1d_left,
-                        x1d_right,
-                        x2d_batch,
-                        scalar_batch,
-                        mask1d=mask1d,
-                        mask2d=mask2d,
-                    )
-                else:
-                    out = model(
-                        x1d_left,
-                        x1d_right,
-                        x2d_batch,
-                        scalar_batch,
-                        mask1d=mask1d,
-                        mask2d=mask2d,
-                    )
+                out = model(
+                    x1d_left,
+                    x1d_right,
+                    x2d_batch,
+                    spec_left_batch,
+                    spec_right_batch,
+                    scalar_batch,
+                    mask1d_left=mask1d_left,
+                    mask1d_right=mask1d_right,
+                    mask2d=mask2d,
+                )
+
                 values = out.detach().cpu().squeeze(-1).tolist()
                 if isinstance(values, float):
                     values = [values]
@@ -1159,5 +1383,5 @@ def run_inference(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    # run_train_model()
-    run_inference()
+    run_train_model()
+    # run_inference()
