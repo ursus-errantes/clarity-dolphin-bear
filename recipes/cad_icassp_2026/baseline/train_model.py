@@ -18,6 +18,85 @@ from clarity.utils.file_io import read_jsonl
 logger = logging.getLogger(__name__)
 
 
+def count_trainable_parameters(model: nn.Module) -> int:
+    """Return number of trainable parameters."""
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def estimate_flops(model: nn.Module, inputs: tuple) -> int:
+    """Estimate FLOPs for a single forward pass using lightweight hooks.
+
+    Supports nn.Linear, nn.Conv1d, nn.Conv2d. Counts multiply-adds as 2 FLOPs per MAC.
+    This is an approximation intended for quick checks rather than exact profiling.
+    """
+    flops = {"total": 0}
+
+    def conv_hook(self, inp, out):
+        # inp[0] shape: (batch, in_ch, ...), out shape: (batch, out_ch, ...)
+        input = inp[0]
+        batch = input.shape[0]
+        out_channels = out.shape[1]
+        # number of output elements per channel
+        out_elements = out[0].numel() / out_channels
+        kernel_ops = 1
+        if hasattr(self, 'kernel_size'):
+            # Conv1d kernel_size is int or tuple
+            k = self.kernel_size
+            if isinstance(k, tuple):
+                kernel_ops = int(np.prod(k))
+            else:
+                kernel_ops = int(k)
+        # in_channels per group
+        in_per_group = self.in_channels // self.groups
+        # ops per output element: kernel_mul_adds * in_per_group
+        ops_per_element = kernel_ops * in_per_group * 2
+        # total conv FLOPs
+        total = int(batch * out_channels * out_elements * ops_per_element)
+        flops['total'] += total
+
+    def linear_hook(self, inp, out):
+        input = inp[0]
+        batch = input.shape[0] if input.dim() > 1 else 1
+        in_features = self.in_features
+        out_features = self.out_features
+        # multiply-adds counted as 2 FLOPs per MAC
+        total = int(batch * in_features * out_features * 2)
+        flops['total'] += total
+
+    handlers = []
+    for module in model.modules():
+        if isinstance(module, nn.Conv1d) or isinstance(module, nn.Conv2d):
+            handlers.append(module.register_forward_hook(conv_hook))
+        elif isinstance(module, nn.Linear):
+            handlers.append(module.register_forward_hook(linear_hook))
+
+    # run a single forward pass (no grad)
+    try:
+        model_cpu = model.cpu()
+        model_cpu.eval()
+        with torch.no_grad():
+            model_cpu(*[inp.cpu() for inp in inputs])
+    except Exception as e:
+        # If the dummy forward fails, log the exception so user can diagnose why
+        import traceback
+
+        logger.warning("FLOPs estimation dummy forward failed: %s", e)
+        logger.debug("Flops estimation stack:\n%s", traceback.format_exc())
+        # Fallback: estimate FLOPs roughly as 2 * number of trainable parameters
+        try:
+            nparams = count_trainable_parameters(model)
+            approx = int(2 * nparams)
+            flops['total'] = approx
+            logger.info("FLOPs estimation fallback: using approx 2*params = %d FLOPs", approx)
+        except Exception:
+            flops['total'] = 0
+    finally:
+        for h in handlers:
+            h.remove()
+
+    return int(flops['total'])
+
+
 class temporal_attention_pool(nn.Module):
     """Learnable attention pooling over time dimension. Works for both 1d and 2d feature inputs."""
     def __init__(self, input_dim):
@@ -584,6 +663,29 @@ def run_train_model(cfg: DictConfig) -> None:
             num_1d_channels, num_2d_channels, num_scalar_features, k=k, p_dropout=p_dropout, post_dropout=post_dropout
         )
     model = model.to(device) # move model to GPU if available
+    # Optionally print model parameter count and FLOPs (single-pass estimate)
+    try:
+        if getattr(cfg.baseline, "print_model_stats", True):
+            n_params = count_trainable_parameters(model)
+            # build small synthetic inputs consistent with model forward signature
+            batch_sample = 1
+            t1 = 3000
+            t2 = 75
+            freq = 13
+            spec_t = 50
+            sample_inputs = (
+                torch.randn(batch_sample, num_1d_channels, t1),
+                torch.randn(batch_sample, num_1d_channels, t1),
+                torch.randn(batch_sample, num_2d_channels, freq, t2),
+                torch.randn(batch_sample, 2, spec_t),
+                torch.randn(batch_sample, 2, spec_t),
+                torch.randn(batch_sample, num_scalar_features),
+            )
+            flops = estimate_flops(model, sample_inputs)
+            logger.info(f"Model params: {n_params:,} ({n_params/1e6:.3f}M), FLOPs (approx): {flops:,} ({flops/1e9:.4f} GFLOPs)")
+            exit(0)
+    except Exception:
+        logger.warning("Failed to compute model stats (params/flops)")
     # DataLoader parallel settings
     num_workers = min(8, max(1, (os.cpu_count() or 4) - 2))
     pin_memory = True if device.type == "cuda" else False
@@ -1014,7 +1116,7 @@ def run_inference(cfg: DictConfig) -> None:
 
     # Find all checkpoint files produced during training and run inference for each.
     # Checkpoints follow the pattern: {dataset}.train.{ModelClass}*.pth
-    ckpt_pattern = f"{cfg.data.dataset}.train.{model.__class__.__name__}*.pth"
+    ckpt_pattern = f"cadenza_data.train.{model.__class__.__name__}*.pth"
     ckpt_dir = Path(".")
     ckpt_paths = sorted(ckpt_dir.glob(ckpt_pattern))
 
@@ -1036,8 +1138,10 @@ def run_inference(cfg: DictConfig) -> None:
     # mfcc directories differ between train/valid on the host; mirror train logic
     if split == "train":
         mfcc_dir = "/mnt/d/cadenza_extracted_features/full_batch_cmvn_mfccs/mfcc/"
-    else:
+    elif split == "valid":
         mfcc_dir = "/mnt/d/cadenza_extracted_features/mfccs_cmvn_valid/mfcc/"
+    elif split == "eval":
+        mfcc_dir = "/mnt/d/cadenza_extracted_features/mfcc-eval/mfcc-cmvn-eval/mfcc/"
 
     # load MFCCs (each file is a json with a single-column of signals)
     x2d_dfs = []
@@ -1062,7 +1166,13 @@ def run_inference(cfg: DictConfig) -> None:
     # keep only signals that have MFCCs available
     merged_df = merged_df[merged_df["signal"].isin(x2d_df.columns)]
     # Quick sanity check for expected sizes
-    expected = 8802 if split == "train" else 1175
+    expected = 0
+    if split == "train":
+        expected = 8802
+    elif split == "valid":
+        expected = 1175
+    else:  # eval
+        expected = 1095
     if len(merged_df) != x2d_df.shape[1]:
         logger.warning(
             f"Mismatch in number of samples between scalar and 2d features: merged_df={len(merged_df)} x2d_cols={x2d_df.shape[1]}"
@@ -1159,5 +1269,5 @@ def run_inference(cfg: DictConfig) -> None:
 
 
 if __name__ == "__main__":
-    # run_train_model()
-    run_inference()
+    run_train_model()
+    # run_inference()

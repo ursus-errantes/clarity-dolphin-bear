@@ -1,0 +1,113 @@
+[2025-11-26 12:19:27,702][__main__][INFO] - Training model on train set...
+[2025-11-26 12:19:29,495][__main__][INFO] - Using device: cuda
+[2025-11-26 12:31:51,761][__main__][WARNING] - Configured resume_checkpoint None does not exist; starting from scratch
+[2025-11-26 12:31:51,762][__main__][INFO] - Training model with parameters:
+ batch size 8, sigmoid steepness 1.0, dropout probability 0.1, post_dropout probability 0.05,optimizer Adam, lr 2e-05, weight decay 0.002, loss SmoothL1Loss(), beta 0.1, num_epochs 50, early stopping patience 10
+[2025-11-26 12:31:51,762][__main__][INFO] - Using augmentation: swap_prob 0.5, noise_std None, emb_noise_std None, scalar_jitter 0.01.Using split strategy: none, using label_jitter 0.01 on training targets.
+[2025-11-26 12:31:51,762][__main__][INFO] - Model type: simple, pin_memory: True, num_workers: 8
+[2025-11-26 12:36:30,952][__main__][INFO] - Epoch 1, Train Loss: 0.2616, Validation Loss: 0.2543, Train MSE: 0.122606, Val MSE: 0.117214, Val Pearson: 0.5112
+[2025-11-26 12:41:16,933][__main__][INFO] - Epoch 2, Train Loss: 0.2433, Validation Loss: 0.2327, Train MSE: 0.110886, Val MSE: 0.103148, Val Pearson: 0.5231
+[2025-11-26 12:46:08,309][__main__][INFO] - Epoch 3, Train Loss: 0.2256, Validation Loss: 0.2144, Train MSE: 0.100912, Val MSE: 0.095689, Val Pearson: 0.5331
+[2025-11-26 12:50:53,658][__main__][INFO] - Epoch 4, Train Loss: 0.2145, Validation Loss: 0.2048, Train MSE: 0.097006, Val MSE: 0.092453, Val Pearson: 0.5394
+[2025-11-26 12:55:37,298][__main__][INFO] - Epoch 5, Train Loss: 0.2074, Validation Loss: 0.1994, Train MSE: 0.094887, Val MSE: 0.090908, Val Pearson: 0.5462
+[2025-11-26 12:55:37,541][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch5.pth
+[2025-11-26 13:00:17,812][__main__][INFO] - Epoch 6, Train Loss: 0.2039, Validation Loss: 0.1962, Train MSE: 0.094217, Val MSE: 0.090645, Val Pearson: 0.5548
+[2025-11-26 13:05:00,220][__main__][INFO] - Epoch 7, Train Loss: 0.2009, Validation Loss: 0.1939, Train MSE: 0.093257, Val MSE: 0.089174, Val Pearson: 0.5588
+[2025-11-26 13:09:43,693][__main__][INFO] - Epoch 8, Train Loss: 0.1977, Validation Loss: 0.1919, Train MSE: 0.092081, Val MSE: 0.088492, Val Pearson: 0.5653
+[2025-11-26 13:14:23,630][__main__][INFO] - Epoch 9, Train Loss: 0.1963, Validation Loss: 0.1904, Train MSE: 0.091198, Val MSE: 0.088675, Val Pearson: 0.5709
+[2025-11-26 13:19:05,752][__main__][INFO] - Epoch 10, Train Loss: 0.1954, Validation Loss: 0.1893, Train MSE: 0.091171, Val MSE: 0.088475, Val Pearson: 0.5749
+[2025-11-26 13:19:05,905][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch10.pth
+[2025-11-26 13:23:51,086][__main__][INFO] - Epoch 11, Train Loss: 0.1928, Validation Loss: 0.1886, Train MSE: 0.090124, Val MSE: 0.088247, Val Pearson: 0.5794
+[2025-11-26 13:28:32,499][__main__][INFO] - Epoch 12, Train Loss: 0.1930, Validation Loss: 0.1875, Train MSE: 0.090137, Val MSE: 0.086418, Val Pearson: 0.5811
+[2025-11-26 13:33:11,495][__main__][INFO] - Epoch 13, Train Loss: 0.1915, Validation Loss: 0.1865, Train MSE: 0.088886, Val MSE: 0.086285, Val Pearson: 0.5839
+[2025-11-26 13:37:52,794][__main__][INFO] - Epoch 14, Train Loss: 0.1902, Validation Loss: 0.1865, Train MSE: 0.088740, Val MSE: 0.087326, Val Pearson: 0.5863
+[2025-11-26 13:42:40,606][__main__][INFO] - Epoch 15, Train Loss: 0.1890, Validation Loss: 0.1856, Train MSE: 0.087972, Val MSE: 0.086842, Val Pearson: 0.5876
+[2025-11-26 13:42:40,758][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch15.pth
+[2025-11-26 13:47:25,012][__main__][INFO] - Epoch 16, Train Loss: 0.1885, Validation Loss: 0.1854, Train MSE: 0.087536, Val MSE: 0.087104, Val Pearson: 0.5892
+[2025-11-26 13:52:10,165][__main__][INFO] - Epoch 17, Train Loss: 0.1869, Validation Loss: 0.1859, Train MSE: 0.087391, Val MSE: 0.088144, Val Pearson: 0.5901
+[2025-11-26 13:56:52,600][__main__][INFO] - Epoch 18, Train Loss: 0.1861, Validation Loss: 0.1844, Train MSE: 0.087128, Val MSE: 0.085397, Val Pearson: 0.5915
+[2025-11-26 14:01:38,225][__main__][INFO] - Epoch 19, Train Loss: 0.1863, Validation Loss: 0.1839, Train MSE: 0.087142, Val MSE: 0.085943, Val Pearson: 0.5925
+[2025-11-26 14:06:21,461][__main__][INFO] - Epoch 20, Train Loss: 0.1856, Validation Loss: 0.1836, Train MSE: 0.086877, Val MSE: 0.085425, Val Pearson: 0.5937
+[2025-11-26 14:06:21,622][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch20.pth
+[2025-11-26 14:11:06,790][__main__][INFO] - Epoch 21, Train Loss: 0.1851, Validation Loss: 0.1834, Train MSE: 0.086490, Val MSE: 0.085003, Val Pearson: 0.5947
+[2025-11-26 14:15:52,067][__main__][INFO] - Epoch 22, Train Loss: 0.1844, Validation Loss: 0.1833, Train MSE: 0.086194, Val MSE: 0.085880, Val Pearson: 0.5947
+[2025-11-26 14:20:36,416][__main__][INFO] - Epoch 23, Train Loss: 0.1846, Validation Loss: 0.1833, Train MSE: 0.086743, Val MSE: 0.085998, Val Pearson: 0.5946
+[2025-11-26 14:25:20,088][__main__][INFO] - Epoch 24, Train Loss: 0.1838, Validation Loss: 0.1842, Train MSE: 0.086149, Val MSE: 0.087696, Val Pearson: 0.5941
+[2025-11-26 14:30:04,567][__main__][INFO] - Epoch 25, Train Loss: 0.1834, Validation Loss: 0.1832, Train MSE: 0.086002, Val MSE: 0.085100, Val Pearson: 0.5961
+[2025-11-26 14:30:04,699][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch25.pth
+[2025-11-26 14:34:55,697][__main__][INFO] - Epoch 26, Train Loss: 0.1837, Validation Loss: 0.1827, Train MSE: 0.086095, Val MSE: 0.085765, Val Pearson: 0.5960
+[2025-11-26 14:39:39,941][__main__][INFO] - Epoch 27, Train Loss: 0.1833, Validation Loss: 0.1830, Train MSE: 0.086197, Val MSE: 0.085240, Val Pearson: 0.5961
+[2025-11-26 14:44:24,845][__main__][INFO] - Epoch 28, Train Loss: 0.1825, Validation Loss: 0.1830, Train MSE: 0.085798, Val MSE: 0.085315, Val Pearson: 0.5967
+[2025-11-26 14:49:06,043][__main__][INFO] - Epoch 29, Train Loss: 0.1830, Validation Loss: 0.1836, Train MSE: 0.086076, Val MSE: 0.085476, Val Pearson: 0.5962
+[2025-11-26 14:53:46,116][__main__][INFO] - Epoch 30, Train Loss: 0.1812, Validation Loss: 0.1825, Train MSE: 0.085302, Val MSE: 0.085625, Val Pearson: 0.5966
+[2025-11-26 14:53:46,276][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch30.pth
+[2025-11-26 14:58:26,439][__main__][INFO] - Epoch 31, Train Loss: 0.1820, Validation Loss: 0.1825, Train MSE: 0.085473, Val MSE: 0.085430, Val Pearson: 0.5971
+[2025-11-26 15:03:06,491][__main__][INFO] - Epoch 32, Train Loss: 0.1824, Validation Loss: 0.1824, Train MSE: 0.086060, Val MSE: 0.085388, Val Pearson: 0.5974
+[2025-11-26 15:07:47,197][__main__][INFO] - Epoch 33, Train Loss: 0.1826, Validation Loss: 0.1829, Train MSE: 0.086316, Val MSE: 0.086445, Val Pearson: 0.5965
+[2025-11-26 15:12:28,506][__main__][INFO] - Epoch 34, Train Loss: 0.1820, Validation Loss: 0.1825, Train MSE: 0.085646, Val MSE: 0.085276, Val Pearson: 0.5977
+[2025-11-26 15:17:07,368][__main__][INFO] - Epoch 35, Train Loss: 0.1818, Validation Loss: 0.1830, Train MSE: 0.085784, Val MSE: 0.085486, Val Pearson: 0.5973
+[2025-11-26 15:17:07,513][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch35.pth
+[2025-11-26 15:21:55,096][__main__][INFO] - Epoch 36, Train Loss: 0.1808, Validation Loss: 0.1821, Train MSE: 0.085097, Val MSE: 0.085685, Val Pearson: 0.5978
+[2025-11-26 15:26:41,466][__main__][INFO] - Epoch 37, Train Loss: 0.1811, Validation Loss: 0.1820, Train MSE: 0.085594, Val MSE: 0.085401, Val Pearson: 0.5982
+[2025-11-26 15:31:22,884][__main__][INFO] - Epoch 38, Train Loss: 0.1811, Validation Loss: 0.1826, Train MSE: 0.085435, Val MSE: 0.085312, Val Pearson: 0.5983
+[2025-11-26 15:36:07,000][__main__][INFO] - Epoch 39, Train Loss: 0.1808, Validation Loss: 0.1831, Train MSE: 0.085398, Val MSE: 0.087412, Val Pearson: 0.5963
+[2025-11-26 15:40:53,906][__main__][INFO] - Epoch 40, Train Loss: 0.1806, Validation Loss: 0.1818, Train MSE: 0.085043, Val MSE: 0.086381, Val Pearson: 0.5979
+[2025-11-26 15:40:54,059][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch40.pth
+[2025-11-26 15:45:34,248][__main__][INFO] - Epoch 41, Train Loss: 0.1808, Validation Loss: 0.1822, Train MSE: 0.085760, Val MSE: 0.085430, Val Pearson: 0.5984
+[2025-11-26 15:50:15,771][__main__][INFO] - Epoch 42, Train Loss: 0.1802, Validation Loss: 0.1819, Train MSE: 0.085071, Val MSE: 0.085977, Val Pearson: 0.5982
+[2025-11-26 15:54:54,271][__main__][INFO] - Epoch 43, Train Loss: 0.1807, Validation Loss: 0.1821, Train MSE: 0.085390, Val MSE: 0.086341, Val Pearson: 0.5981
+[2025-11-26 15:59:36,784][__main__][INFO] - Epoch 44, Train Loss: 0.1804, Validation Loss: 0.1824, Train MSE: 0.085344, Val MSE: 0.086550, Val Pearson: 0.5976
+[2025-11-26 16:04:19,049][__main__][INFO] - Epoch 45, Train Loss: 0.1813, Validation Loss: 0.1823, Train MSE: 0.085388, Val MSE: 0.086603, Val Pearson: 0.5980
+[2025-11-26 16:04:19,230][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch45.pth
+[2025-11-26 16:09:02,723][__main__][INFO] - Epoch 46, Train Loss: 0.1809, Validation Loss: 0.1820, Train MSE: 0.085230, Val MSE: 0.086169, Val Pearson: 0.5983
+[2025-11-26 16:13:55,541][__main__][INFO] - Epoch 47, Train Loss: 0.1799, Validation Loss: 0.1818, Train MSE: 0.085178, Val MSE: 0.085897, Val Pearson: 0.5985
+[2025-11-26 16:18:41,412][__main__][INFO] - Epoch 48, Train Loss: 0.1805, Validation Loss: 0.1818, Train MSE: 0.085590, Val MSE: 0.085561, Val Pearson: 0.5988
+[2025-11-26 16:23:22,661][__main__][INFO] - Epoch 49, Train Loss: 0.1798, Validation Loss: 0.1833, Train MSE: 0.085384, Val MSE: 0.087240, Val Pearson: 0.5958
+[2025-11-26 16:28:02,845][__main__][INFO] - Epoch 50, Train Loss: 0.1795, Validation Loss: 0.1822, Train MSE: 0.084437, Val MSE: 0.085898, Val Pearson: 0.5975
+[2025-11-26 16:28:02,999][__main__][INFO] - Saved checkpoint to cadenza_data.train.simple_meanpool_scalar_mlp.epoch50.pth
+[2025-11-26 16:28:05,668][__main__][INFO] - Model saved to cadenza_data.train.simple_meanpool_scalar_mlp.pth
+[2025-11-26 16:28:05,668][__main__][INFO] - simple_meanpool_scalar_mlp(
+  (proj_left): Linear(in_features=512, out_features=64, bias=True)
+  (proj_right): Linear(in_features=512, out_features=64, bias=True)
+  (proj_2d): Linear(in_features=2, out_features=32, bias=True)
+  (mlp_scalar): Sequential(
+    (0): Linear(in_features=3, out_features=32, bias=True)
+    (1): ReLU()
+  )
+  (final_mlp): Sequential(
+    (0): Linear(in_features=192, out_features=64, bias=True)
+    (1): ReLU()
+    (2): Dropout(p=0.1, inplace=False)
+    (3): Linear(in_features=64, out_features=32, bias=True)
+    (4): ReLU()
+    (5): Dropout(p=0.1, inplace=False)
+    (6): Linear(in_features=32, out_features=1, bias=True)
+  )
+)
+[2025-11-26 16:28:05,678][__main__][INFO] - Final training loss: 0.1795, final validation loss: 0.1822
+[2025-11-26 16:49:07,606][__main__][INFO] - Using device: cuda
+[2025-11-26 16:49:07,627][__main__][INFO] - Found 11 checkpoint(s) for inference
+[2025-11-26 16:49:07,628][__main__][INFO] - Preparing inference data for split=valid
+[2025-11-26 16:49:46,664][__main__][WARNING] - Merged DataFrame has no 'correctness' column; creating dummy zero labels.
+[2025-11-26 16:49:46,666][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch10.pth...
+[2025-11-26 16:50:57,243][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch10.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch10.inference.csv
+[2025-11-26 16:50:57,244][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch15.pth...
+[2025-11-26 16:51:11,484][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch15.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch15.inference.csv
+[2025-11-26 16:51:11,484][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch20.pth...
+[2025-11-26 16:51:25,811][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch20.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch20.inference.csv
+[2025-11-26 16:51:25,811][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch25.pth...
+[2025-11-26 16:51:40,515][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch25.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch25.inference.csv
+[2025-11-26 16:51:40,516][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch30.pth...
+[2025-11-26 16:51:55,857][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch30.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch30.inference.csv
+[2025-11-26 16:51:55,858][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch35.pth...
+[2025-11-26 16:52:11,165][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch35.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch35.inference.csv
+[2025-11-26 16:52:11,166][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch40.pth...
+[2025-11-26 16:52:26,166][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch40.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch40.inference.csv
+[2025-11-26 16:52:26,167][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch45.pth...
+[2025-11-26 16:52:40,963][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch45.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch45.inference.csv
+[2025-11-26 16:52:40,963][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch5.pth...
+[2025-11-26 16:52:54,910][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch5.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch5.inference.csv
+[2025-11-26 16:52:54,910][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch50.pth...
+[2025-11-26 16:53:10,644][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.epoch50.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.epoch50.inference.csv
+[2025-11-26 16:53:10,644][__main__][INFO] - Running inference using checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.pth...
+[2025-11-26 16:53:26,084][__main__][INFO] - Saved inference results for checkpoint cadenza_data.train.simple_meanpool_scalar_mlp.pth to cadenza_data.valid.simple_meanpool_scalar_mlp.cadenza_data.train.simple_meanpool_scalar_mlp.inference.csv
